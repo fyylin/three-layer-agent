@@ -1,0 +1,35 @@
+# Build
+build/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dll
+*.exe
+agent_runner
+agent_runner_linux_demo
+
+# Config with secrets
+config/agent_config.json
+
+# Workspace (runtime state — not source)
+workspace/
+
+# IDE
+.vscode/
+.idea/
+*.xcodeproj/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+*.ndjson
+
+# Python
+__pycache__/
+*.pyc
+
+# Windows
+Thumbs.db
