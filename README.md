@@ -63,7 +63,7 @@ Agents decompose goals, delegate work, review results, and learn from experience
 
 ```bash
 # Clone
-git clone https://github.com/your-org/three-layer-agent
+git clone https://github.com/fyylin/three-layer-agent
 cd three-layer-agent
 
 # Configure
