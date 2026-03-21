@@ -25,6 +25,11 @@ std::string tool_explain_code(const std::string& input);
 // Output: list of caller locations
 std::string tool_find_callers(const std::string& input);
 
+// find_implementations: find implementations of an interface/base class
+// Input:  "class_name\nroot_directory"
+// Output: list of implementation locations
+std::string tool_find_implementations(const std::string& input);
+
 // Register code intelligence tools
 void register_indexer_tools(agent::ToolRegistry& registry);
 

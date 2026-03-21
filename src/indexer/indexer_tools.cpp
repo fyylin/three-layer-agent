@@ -114,11 +114,43 @@ std::string tool_find_callers(const std::string& input) {
     return out.str();
 }
 
+std::string tool_find_implementations(const std::string& input) {
+    auto nl = input.find('\n');
+    if (nl == std::string::npos) {
+        return "Error: input format is 'class_name\\nroot_dir'";
+    }
+
+    std::string cls = input.substr(0, nl);
+    std::string root = input.substr(nl + 1);
+
+    auto runner = [](const std::string& cmd) -> std::string {
+        return agent::tool_run_command(cmd);
+    };
+
+    SimpleIndexer indexer(runner);
+    auto refs = indexer.find_references(": public " + cls, root);
+
+    if (refs.empty()) {
+        refs = indexer.find_references(": " + cls, root);
+    }
+
+    if (refs.empty()) {
+        return "No implementations found for: " + cls;
+    }
+
+    std::ostringstream out;
+    for (const auto& ref : refs) {
+        out << ref.file << ":" << ref.line << ": " << ref.context << "\n";
+    }
+    return out.str();
+}
+
 void register_indexer_tools(agent::ToolRegistry& registry) {
     registry.register_tool("find_definition", tool_find_definition);
     registry.register_tool("find_references", tool_find_references);
     registry.register_tool("explain_code", tool_explain_code);
     registry.register_tool("find_callers", tool_find_callers);
+    registry.register_tool("find_implementations", tool_find_implementations);
 }
 
 } // namespace indexer
