@@ -61,6 +61,7 @@ set(AGENT_SOURCES
     src/utils/structured_log.cpp
     src/utils/tool_set.cpp
     src/indexer/simple_indexer.cpp
+    src/indexer/indexer_tools.cpp
 )
 
 set(AGENT_SOURCES_FULL

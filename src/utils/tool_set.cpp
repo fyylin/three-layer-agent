@@ -3,6 +3,7 @@
 // =============================================================================
 
 #include "utils/tool_set.hpp"
+#include "indexer/indexer_tools.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -636,6 +637,8 @@ void register_all_tools(ToolRegistry& registry) {
     registry.register_tool("run_command",    tool_run_command);
     // Utility
     registry.register_tool("echo",           tool_echo);
+    // Code Intelligence
+    indexer::register_indexer_tools(registry);
 
     // Meta-tool: create new tools at runtime
     registry.register_tool("create_tool",

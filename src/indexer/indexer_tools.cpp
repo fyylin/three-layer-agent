@@ -1,0 +1,67 @@
+#include "indexer/indexer_tools.hpp"
+#include "indexer/simple_indexer.hpp"
+#include "utils/tool_set.hpp"
+#include <sstream>
+
+namespace indexer {
+
+std::string tool_find_definition(const std::string& input) {
+    auto nl = input.find('\n');
+    if (nl == std::string::npos) {
+        return "Error: input format is 'symbol\\nroot_dir'";
+    }
+
+    std::string symbol = input.substr(0, nl);
+    std::string root_dir = input.substr(nl + 1);
+
+    // Use run_command as the command runner
+    auto runner = [](const std::string& cmd) -> std::string {
+        return agent::tool_run_command(cmd);
+    };
+
+    SimpleIndexer indexer(runner);
+    auto info = indexer.find_definition(symbol, root_dir);
+
+    if (info.definition.file.empty()) {
+        return "Not found: " + symbol;
+    }
+
+    std::ostringstream out;
+    out << info.definition.file << ":" << info.definition.line
+        << ": " << info.definition.context;
+    return out.str();
+}
+
+std::string tool_find_references(const std::string& input) {
+    auto nl = input.find('\n');
+    if (nl == std::string::npos) {
+        return "Error: input format is 'symbol\\nroot_dir'";
+    }
+
+    std::string symbol = input.substr(0, nl);
+    std::string root_dir = input.substr(nl + 1);
+
+    auto runner = [](const std::string& cmd) -> std::string {
+        return agent::tool_run_command(cmd);
+    };
+
+    SimpleIndexer indexer(runner);
+    auto refs = indexer.find_references(symbol, root_dir);
+
+    if (refs.empty()) {
+        return "No references found for: " + symbol;
+    }
+
+    std::ostringstream out;
+    for (const auto& ref : refs) {
+        out << ref.file << ":" << ref.line << ": " << ref.context << "\n";
+    }
+    return out.str();
+}
+
+void register_indexer_tools(agent::ToolRegistry& registry) {
+    registry.register_tool("find_definition", tool_find_definition);
+    registry.register_tool("find_references", tool_find_references);
+}
+
+} // namespace indexer
