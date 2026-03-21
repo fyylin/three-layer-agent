@@ -145,12 +145,42 @@ std::string tool_find_implementations(const std::string& input) {
     return out.str();
 }
 
+std::string tool_analyze_crash(const std::string& input) {
+    std::ostringstream out;
+    std::istringstream in(input);
+    std::string line;
+
+    while (getline(in, line)) {
+        size_t pos = line.find(".cpp:");
+        if (pos == std::string::npos) pos = line.find(".hpp:");
+        if (pos != std::string::npos) {
+            size_t start = line.rfind('/', pos);
+            if (start == std::string::npos) start = line.rfind('\\', pos);
+            if (start != std::string::npos) {
+                out << line.substr(start + 1) << "\n";
+            }
+        }
+    }
+    return out.str().empty() ? "No file locations found in stack trace" : out.str();
+}
+
+std::string tool_run_tests(const std::string& input) {
+    return agent::tool_run_command("cd " + input + " && ctest --output-on-failure");
+}
+
+std::string tool_create_fix_branch(const std::string& input) {
+    return agent::tool_run_command("git checkout -b " + input);
+}
+
 void register_indexer_tools(agent::ToolRegistry& registry) {
     registry.register_tool("find_definition", tool_find_definition);
     registry.register_tool("find_references", tool_find_references);
     registry.register_tool("explain_code", tool_explain_code);
     registry.register_tool("find_callers", tool_find_callers);
     registry.register_tool("find_implementations", tool_find_implementations);
+    registry.register_tool("analyze_crash", tool_analyze_crash);
+    registry.register_tool("run_tests", tool_run_tests);
+    registry.register_tool("create_fix_branch", tool_create_fix_branch);
 }
 
 } // namespace indexer

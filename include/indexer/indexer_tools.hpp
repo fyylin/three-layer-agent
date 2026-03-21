@@ -30,6 +30,21 @@ std::string tool_find_callers(const std::string& input);
 // Output: list of implementation locations
 std::string tool_find_implementations(const std::string& input);
 
+// analyze_crash: parse stack trace and locate bug
+// Input:  stack trace text
+// Output: file locations and analysis
+std::string tool_analyze_crash(const std::string& input);
+
+// run_tests: detect test framework and run tests
+// Input:  "root_directory"
+// Output: test results
+std::string tool_run_tests(const std::string& input);
+
+// create_fix_branch: git workflow automation
+// Input:  "branch_name"
+// Output: branch creation status
+std::string tool_create_fix_branch(const std::string& input);
+
 // Register code intelligence tools
 void register_indexer_tools(agent::ToolRegistry& registry);
 
