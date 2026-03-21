@@ -172,6 +172,23 @@ std::string tool_create_fix_branch(const std::string& input) {
     return agent::tool_run_command("git checkout -b " + input);
 }
 
+std::string tool_scan_complexity(const std::string& input) {
+    auto result = agent::tool_run_command("cd " + input + " && grep -rn \"for\\|while\\|if\" --include=\"*.cpp\" | wc -l");
+    return "Complex functions found: " + result;
+}
+
+std::string tool_find_duplicates(const std::string& input) {
+    return agent::tool_run_command("cd " + input + " && grep -rn \"TODO\\|FIXME\" --include=\"*.cpp\" --include=\"*.hpp\"");
+}
+
+std::string tool_generate_report(const std::string& input) {
+    std::ostringstream out;
+    out << "=== Tech Debt Report ===\n";
+    out << tool_scan_complexity(input) << "\n";
+    out << tool_find_duplicates(input);
+    return out.str();
+}
+
 void register_indexer_tools(agent::ToolRegistry& registry) {
     registry.register_tool("find_definition", tool_find_definition);
     registry.register_tool("find_references", tool_find_references);
@@ -181,6 +198,9 @@ void register_indexer_tools(agent::ToolRegistry& registry) {
     registry.register_tool("analyze_crash", tool_analyze_crash);
     registry.register_tool("run_tests", tool_run_tests);
     registry.register_tool("create_fix_branch", tool_create_fix_branch);
+    registry.register_tool("scan_complexity", tool_scan_complexity);
+    registry.register_tool("find_duplicates", tool_find_duplicates);
+    registry.register_tool("generate_report", tool_generate_report);
 }
 
 } // namespace indexer

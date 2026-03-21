@@ -45,6 +45,21 @@ std::string tool_run_tests(const std::string& input);
 // Output: branch creation status
 std::string tool_create_fix_branch(const std::string& input);
 
+// scan_complexity: find complex functions
+// Input:  "root_directory"
+// Output: list of complex functions
+std::string tool_scan_complexity(const std::string& input);
+
+// find_duplicates: detect code duplication
+// Input:  "root_directory"
+// Output: duplicate code blocks
+std::string tool_find_duplicates(const std::string& input);
+
+// generate_report: weekly tech debt report
+// Input:  "root_directory"
+// Output: formatted report
+std::string tool_generate_report(const std::string& input);
+
 // Register code intelligence tools
 void register_indexer_tools(agent::ToolRegistry& registry);
 
