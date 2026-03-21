@@ -15,6 +15,16 @@ std::string tool_find_definition(const std::string& input);
 // Output: list of file:line:context entries
 std::string tool_find_references(const std::string& input);
 
+// explain_code: extract and format code snippet with context
+// Input:  "file_path\nstart_line\nend_line"
+// Output: formatted code with line numbers
+std::string tool_explain_code(const std::string& input);
+
+// find_callers: find functions that call a given function
+// Input:  "function_name\nroot_directory"
+// Output: list of caller locations
+std::string tool_find_callers(const std::string& input);
+
 // Register code intelligence tools
 void register_indexer_tools(agent::ToolRegistry& registry);
 
