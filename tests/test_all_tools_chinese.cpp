@@ -1,5 +1,6 @@
 #include <iostream>
 #include <cassert>
+#include <cstring>
 #include "utils/tool_set.hpp"
 #include "utils/workspace.hpp"
 
@@ -21,7 +22,7 @@ int main() {
     if (h != INVALID_HANDLE_VALUE) {
         const char* content = "测试内容\nTest content";
         DWORD written;
-        WriteFile(h, content, strlen(content), &written, nullptr);
+        WriteFile(h, content, static_cast<DWORD>(std::strlen(content)), &written, nullptr);
         CloseHandle(h);
     }
 

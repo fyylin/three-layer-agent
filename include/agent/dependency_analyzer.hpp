@@ -9,11 +9,11 @@ class DependencyAnalyzer {
 public:
     struct TaskGraph {
         std::vector<AtomicTask> tasks;
-        std::vector<std::pair<int, int>> dependencies; // (from_idx, to_idx)
+        std::vector<std::pair<size_t, size_t>> dependencies; // (from_idx, to_idx)
     };
 
     TaskGraph analyze(const std::vector<AtomicTask>& tasks) const;
-    std::vector<std::vector<int>> get_parallel_batches(const TaskGraph& graph) const;
+    std::vector<std::vector<size_t>> get_parallel_batches(const TaskGraph& graph) const;
 
 private:
     bool has_dependency(const AtomicTask& a, const AtomicTask& b) const;

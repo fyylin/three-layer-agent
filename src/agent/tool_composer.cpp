@@ -26,7 +26,7 @@ std::string ToolComposer::try_pdf_extraction(const std::string& path) {
         std::string result;
         FILE* pipe = popen(cmd.c_str(), "r");
         if (pipe) {
-            while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
+            while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
                 result += buffer.data();
             }
             pclose(pipe);
@@ -47,7 +47,7 @@ std::string ToolComposer::try_python_script(const std::string& script) {
     std::string result;
     FILE* pipe = popen(script.c_str(), "r");
     if (pipe) {
-        while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
+        while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
             result += buffer.data();
         }
         pclose(pipe);

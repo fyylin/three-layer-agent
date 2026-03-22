@@ -29,7 +29,7 @@ private:
     DependencyAnalyzer dep_analyzer_;
 
     std::vector<AtomicResult> execute_batch(
-        const std::vector<int>& batch_indices,
+        const std::vector<size_t>& batch_indices,
         const std::vector<AtomicTask>& tasks);
 };
 

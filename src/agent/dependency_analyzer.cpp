@@ -22,12 +22,12 @@ DependencyAnalyzer::TaskGraph DependencyAnalyzer::analyze(
     return graph;
 }
 
-std::vector<std::vector<int>> DependencyAnalyzer::get_parallel_batches(
+std::vector<std::vector<size_t>> DependencyAnalyzer::get_parallel_batches(
         const TaskGraph& graph) const {
 
-    std::vector<std::vector<int>> batches;
-    std::unordered_set<int> completed;
-    std::vector<int> in_degree(graph.tasks.size(), 0);
+    std::vector<std::vector<size_t>> batches;
+    std::unordered_set<size_t> completed;
+    std::vector<size_t> in_degree(graph.tasks.size(), 0);
 
     // 计算入度
     for (const auto& [from, to] : graph.dependencies) {
@@ -36,7 +36,7 @@ std::vector<std::vector<int>> DependencyAnalyzer::get_parallel_batches(
 
     // 拓扑排序分批
     while (completed.size() < graph.tasks.size()) {
-        std::vector<int> current_batch;
+        std::vector<size_t> current_batch;
 
         // 找出所有入度为 0 的任务
         for (size_t i = 0; i < graph.tasks.size(); ++i) {
@@ -51,7 +51,7 @@ std::vector<std::vector<int>> DependencyAnalyzer::get_parallel_batches(
         batches.push_back(current_batch);
 
         // 更新入度
-        for (int idx : current_batch) {
+        for (size_t idx : current_batch) {
             completed.insert(idx);
             for (const auto& [from, to] : graph.dependencies) {
                 if (from == idx) {

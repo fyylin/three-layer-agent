@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+﻿cmake_minimum_required(VERSION 3.20)
 project(ThreeLayerAgent LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -184,10 +184,14 @@ add_agent_test(test_integration tests/test_integration.cpp)
 install(TARGETS agent_runner DESTINATION bin)
 install(DIRECTORY prompts/ DESTINATION share/three_layer_agent/prompts)
 install(DIRECTORY config/  DESTINATION share/three_layer_agent/config)
-add_executable(test_indexer_demo test_indexer_demo.cpp)
-target_include_directories(test_indexer_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(test_indexer_demo PRIVATE agent_stub)
+if(EXISTS "${CMAKE_SOURCE_DIR}/test_indexer_demo.cpp")
+    add_executable(test_indexer_demo test_indexer_demo.cpp)
+    target_include_directories(test_indexer_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    target_link_libraries(test_indexer_demo PRIVATE agent_stub)
+endif()
 
 add_executable(test_real_indexer tests/test_real_indexer.cpp)
 target_include_directories(test_real_indexer PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(test_real_indexer PRIVATE agent_stub)
+
+

@@ -56,13 +56,13 @@ std::vector<AtomicResult> ManagerDispatcher::dispatch_with_dependencies(
 }
 
 std::vector<AtomicResult> ManagerDispatcher::execute_batch(
-        const std::vector<int>& batch_indices,
+        const std::vector<size_t>& batch_indices,
         const std::vector<AtomicTask>& tasks) {
 
     std::vector<std::future<AtomicResult>> futures;
     futures.reserve(batch_indices.size());
 
-    for (int idx : batch_indices) {
+    for (size_t idx : batch_indices) {
         const auto& task = tasks[idx];
         auto* worker = worker_selector_(task.tool, idx);
 
