@@ -643,6 +643,16 @@ TEST(test_tool_list_dir_traversal_denied) {
     assert(threw);
 }
 
+TEST(test_tool_list_dir_missing_path_throws) {
+    bool threw = false;
+    std::string missing = tmp_dir() + "_missing_dir";
+    try { tool_list_dir(missing); }
+    catch (const std::exception& e) {
+        threw = true;
+        assert(std::string(e.what()).find(missing) != std::string::npos);
+    }
+    assert(threw);
+}
 TEST(test_tool_delete_file) {
     std::string path = tmp_dir() + "_del.txt";
     { std::ofstream f(path); f << "delete me"; }
@@ -779,6 +789,7 @@ int main() {
     RUN(test_tool_run_command_blocked);
     RUN(test_tool_list_dir_current);
     RUN(test_tool_list_dir_traversal_denied);
+    RUN(test_tool_list_dir_missing_path_throws);
     RUN(test_tool_delete_file);
     RUN(test_tool_registry_all_tools_registered);
 

@@ -3,6 +3,7 @@
 // Backward compatible: ctx defaults to AgentContext{} (all nullptrs = no-op)
 // =============================================================================
 #include "agent/worker_agent.hpp"
+#include "agent/file_type_handler.hpp"
 #include "utils/experience_manager.hpp"
 #include "agent/exceptions.hpp"
 #include "agent/reflection.hpp"
@@ -164,6 +165,42 @@ AtomicResult WorkerAgent::execute(const AtomicTask& task) noexcept {
             LOG_INFO(kLayer, id_, task.id,
                 "C1: injected predecessor output from " + task.input_from);
         }
+    }
+
+    // -- Step 0.5: Extract tool from description if missing --------
+    if (task.tool.empty() && !task.description.empty()) {
+        std::string desc = task.description;
+        auto use_pos = desc.find("Use ");
+        if (use_pos != std::string::npos && use_pos < 10) {
+            size_t tool_start = use_pos + 4;
+            size_t tool_end = desc.find_first_of(" \t.(", tool_start);
+            if (tool_end == std::string::npos) tool_end = desc.size();
+            std::string extracted_tool = desc.substr(tool_start, tool_end - tool_start);
+
+            if (registry_.has_tool(extracted_tool)) {
+                const_cast<AtomicTask&>(task).tool = extracted_tool;
+                LOG_INFO(kLayer, id_, task.id,
+                    "extracted tool '" + extracted_tool + "' from description");
+
+                auto input_pos = desc.find("Input: ");
+                if (input_pos != std::string::npos) {
+                    std::string extracted_input = desc.substr(input_pos + 7);
+                    while (!extracted_input.empty() &&
+                           (extracted_input.front() == '"' || extracted_input.front() == '\'' || extracted_input.front() == ' '))
+                        extracted_input = extracted_input.substr(1);
+                    while (!extracted_input.empty() &&
+                           (extracted_input.back() == '"' || extracted_input.back() == '\'' || extracted_input.back() == ' '))
+                        extracted_input.pop_back();
+                    const_cast<AtomicTask&>(task).input = extracted_input;
+                    LOG_INFO(kLayer, id_, task.id,
+                        "extracted input: " + extracted_input.substr(0, 40));
+                }
+            }
+        }
+    }
+
+    if (task.tool.empty() && !task.description.empty()) {
+        LOG_WARN(kLayer, id_, task.id, "no tool specified, will rely on LLM");
     }
 
     // -- Step 1: tool call with pre-flight meta-cognition checks --------
@@ -454,7 +491,16 @@ AtomicResult WorkerAgent::execute(const AtomicTask& task) noexcept {
                 "calling LLM (attempt " + std::to_string(attempt+1) + ")");
 
             auto t_start = std::chrono::steady_clock::now();
-            std::string llm_out = client_.complete(system_prompt_, user_msg, task.id);
+            std::string llm_out;
+            client_.complete_stream(system_prompt_, user_msg,
+                [&](const std::string& chunk) {
+                    llm_out += chunk;
+                    if (ctx_.bus) {
+                        nlohmann::json cj;
+                        cj["agent"] = id_; cj["chunk"] = chunk;
+                        ctx_.bus->broadcast(id_, MsgType::Dialog, cj.dump());
+                    }
+                }, task.id);
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - t_start).count();
 
@@ -762,17 +808,78 @@ std::string WorkerAgent::call_tool(const AtomicTask& task) const noexcept {
             "tool not found: " + task.tool + " -- proceeding without it");
         return "[Tool '" + task.tool + "' is not available]";
     }
-    LOG_DEBUG(kLayer, id_, task.id, "invoking tool: " + task.tool);
-    try {
-        std::string out = registry_.invoke(task.tool, task.input, task.id);
-        return out;
-    } catch (const ToolException& e) {
-        LOG_WARN(kLayer, id_, task.id,
-            std::string("tool failed: ") + e.what());
-        return "[Tool error: " + std::string(e.what()) + "]";
-    } catch (...) {
-        return "[Tool error: unknown exception]";
+
+    // File type pre-check for read_file
+    if (task.tool == "read_file" && !task.input.empty()) {
+        if (auto special = FileTypeHandler::handle_special_file(task.input, "read"); special) {
+            LOG_INFO(kLayer, id_, task.id, "file type handler: " + *special);
+            return *special;
+        }
     }
+
+    LOG_DEBUG(kLayer, id_, task.id, "invoking tool: " + task.tool);
+
+    auto start = std::chrono::steady_clock::now();
+    bool success = false;
+    std::string out;
+    FailureCategory fail_cat = FailureCategory::None;
+
+    try {
+        out = registry_.invoke(task.tool, task.input, task.id);
+        success = true;
+    } catch (const ToolException& e) {
+        LOG_WARN(kLayer, id_, task.id, std::string("tool failed: ") + e.what());
+        out = "[Tool error: " + std::string(e.what()) + "]";
+        fail_cat = classify_failure(out);
+    } catch (...) {
+        out = "[Tool error: unknown exception]";
+        fail_cat = FailureCategory::Unknown;
+    }
+
+    auto end = std::chrono::steady_clock::now();
+    double duration_ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+    // Record stats
+    if (ctx_.tool_stats)
+        ctx_.tool_stats->record_call(task.tool, success, duration_ms);
+
+    // Record experience
+    if (ctx_.exp_mgr_ptr) {
+        auto* exp = static_cast<ExperienceManager*>(ctx_.exp_mgr_ptr.get());
+        std::string lesson = success ? "Tool succeeded" : out.substr(0, 100);
+        exp->record(task.tool, task.input, success ? "success" : "failure", lesson, fail_cat);
+    }
+
+    return out;
+}
+
+// -- classify_failure ----------------------------------------------------------
+
+FailureCategory WorkerAgent::classify_failure(const std::string& error) const noexcept {
+    if (error.find("syntax") != std::string::npos ||
+        error.find("parse") != std::string::npos ||
+        error.find("compilation") != std::string::npos)
+        return FailureCategory::SyntaxError;
+    if (error.find("timeout") != std::string::npos ||
+        error.find("timed out") != std::string::npos)
+        return FailureCategory::Timeout;
+    if (error.find("permission") != std::string::npos ||
+        error.find("denied") != std::string::npos ||
+        error.find("access") != std::string::npos)
+        return FailureCategory::PermissionDenied;
+    if (error.find("not found") != std::string::npos ||
+        error.find("does not exist") != std::string::npos ||
+        error.find("no such") != std::string::npos)
+        return FailureCategory::NotFound;
+    if (error.find("environment") != std::string::npos ||
+        error.find("dependency") != std::string::npos ||
+        error.find("missing") != std::string::npos)
+        return FailureCategory::EnvError;
+    if (error.find("logic") != std::string::npos ||
+        error.find("runtime") != std::string::npos ||
+        error.find("assertion") != std::string::npos)
+        return FailureCategory::LogicError;
+    return FailureCategory::Unknown;
 }
 
 // -- parse_response ------------------------------------------------------------

@@ -435,7 +435,32 @@ std::pair<bool, std::string> SupervisorAgent::evaluate(
         std::ostringstream msg;
         msg << "## User goal\n" << goal.description << "\n\n"
             << "## Agent answer\n" << result.answer << "\n\n"
-            << "Does the answer substantially address the goal?\n"
+            << "## Tool evidence\n";
+        if (result.sub_reports.empty()) {
+            msg << "(no subtask reports)\n";
+        } else {
+            for (const auto& report : result.sub_reports) {
+                msg << "- " << report.subtask_id
+                    << " status=" << status_to_string(report.status);
+                if (!report.summary.empty())
+                    msg << " summary=" << report.summary.substr(0, 240);
+                if (!report.issues.empty())
+                    msg << " issues=" << report.issues.substr(0, 240);
+                msg << "\n";
+                size_t shown = 0;
+                for (const auto& atomic : report.results) {
+                    if (shown++ >= 3) break;
+                    msg << "  * " << atomic.task_id
+                        << " status=" << status_to_string(atomic.status);
+                    if (!atomic.output.empty())
+                        msg << " output=" << atomic.output.substr(0, 160);
+                    if (!atomic.error.empty())
+                        msg << " error=" << atomic.error.substr(0, 160);
+                    msg << "\n";
+                }
+            }
+        }
+        msg << "\nDoes the answer substantially address the goal and remain consistent with the tool evidence?\n"
             << "Respond ONLY: "
                "{\"satisfied\":true/false,\"note\":\"<reason if false>\"}";
         std::string    out = client_.complete(system_prompt_, msg.str(), "sup-eval");
@@ -445,8 +470,10 @@ std::pair<bool, std::string> SupervisorAgent::evaluate(
         if (j.contains("note"))      j["note"].get_to(note);
         return {satisfied, note};
     } catch (const std::exception& e) {
+        std::string issue = detect_structural_issues(result);
         LOG_WARN(kLayer, id_, "sup",
-            std::string("eval failed (assuming satisfied): ") + e.what());
+            std::string("eval failed, using structural fallback: ") + e.what());
+        if (!issue.empty()) return {false, issue};
         return {true, ""};
     }
 }

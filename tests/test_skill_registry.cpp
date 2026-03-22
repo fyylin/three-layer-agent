@@ -15,7 +15,9 @@
 #include "agent/worker_agent.hpp"
 #include "agent/tool_registry.hpp"
 #include <cassert>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -56,6 +58,20 @@ static SkillDef make_skill(const std::string& name,
     s.created_by  = "test";
     s.run_id      = "run-test";
     return s;
+}
+
+static std::string make_temp_skill_dir() {
+    std::string suffix = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count() % 100000);
+#ifdef _WIN32
+    const char* base = std::getenv("TEMP");
+    std::string root = (base && *base) ? base : ".";
+    return root + "\\skill_test_" + suffix;
+#else
+    const char* base = std::getenv("TMPDIR");
+    std::string root = (base && *base) ? base : "/tmp";
+    return root + "/skill_test_" + suffix;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -296,8 +312,7 @@ TEST(test_skill_stats_update) {
 // SkillRegistry  --  disk persistence
 // ---------------------------------------------------------------------------
 TEST(test_skill_persist_save_load) {
-    std::string dir = "/tmp/skill_test_" + std::to_string(
-        std::chrono::steady_clock::now().time_since_epoch().count() % 100000);
+    std::string dir = make_temp_skill_dir();
 
     // Save
     {

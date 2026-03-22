@@ -11,16 +11,21 @@
 #include <vector>
 #include <map>
 #include <filesystem>
-#include <fstream>
 #include <sstream>
 #include <algorithm>
 #include <mutex>
 #include <optional>
 #include <chrono>
 
+#include "utils/utf8_fstream.hpp"
+
 namespace agent {
 
 namespace fs = std::filesystem;
+
+inline fs::path prompt_fs_path(const std::string& utf8_path) {
+    return fs::u8path(utf8_path);
+}
 
 // Frontmatter extracted from YAML header of a .md file
 struct PromptMeta {
@@ -119,8 +124,9 @@ public:
     [[nodiscard]] std::vector<std::string> list_skills() const {
         std::vector<std::string> result;
         std::string skills_dir = dir_ + "/skills";
-        if (!fs::exists(skills_dir)) return result;
-        for (auto& e : fs::directory_iterator(skills_dir)) {
+        fs::path skills_path = prompt_fs_path(skills_dir);
+        if (!fs::exists(skills_path)) return result;
+        for (auto& e : fs::directory_iterator(skills_path)) {
             if (e.path().extension() == ".md")
                 result.push_back(e.path().stem().string());
         }
@@ -131,8 +137,9 @@ public:
     // List all available .md prompt files for diagnostics
     [[nodiscard]] std::vector<std::string> list_prompts() const {
         std::vector<std::string> result;
-        if (!fs::exists(dir_)) return result;
-        for (auto& e : fs::recursive_directory_iterator(dir_)) {
+        fs::path root = prompt_fs_path(dir_);
+        if (!fs::exists(root)) return result;
+        for (auto& e : fs::recursive_directory_iterator(root)) {
             if (e.path().extension() == ".md")
                 result.push_back(e.path().string());
         }
@@ -174,6 +181,7 @@ private:
             {"director-decompose",      "director/skills/decompose.md"},
             {"director-review",         "director/skills/review.md"},
             {"director-synthesise",     "director/skills/synthesise.md"},
+            {"director-classify",       "director/skills/classify.md"},
             {"director-conversational", "director/skills/conversational.md"},
             {"manager-decompose",       "manager/skills/decompose.md"},
             {"manager-validate",        "manager/skills/validate.md"},
@@ -210,7 +218,7 @@ private:
             auto it = file_cache_.find(path);
             if (it != file_cache_.end()) return it->second;
         }
-        std::ifstream f(path);
+        agent::utf8_ifstream f(path);
         if (!f.is_open()) return std::nullopt;
         std::ostringstream ss;
         ss << f.rdbuf();
@@ -226,7 +234,7 @@ private:
     std::optional<std::string> load_file_from_cwd(const std::string& name) const {
         // Check cwd first, then up one level
         for (auto& candidate : {"./" + name, "../" + name}) {
-            std::ifstream f(candidate);
+            agent::utf8_ifstream f(candidate);
             if (f.is_open()) {
                 std::ostringstream ss; ss << f.rdbuf();
                 return ss.str();

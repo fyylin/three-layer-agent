@@ -2,6 +2,7 @@
 // src/utils/file_lock.cpp
 // =============================================================================
 #include "utils/file_lock.hpp"
+#include "utils/utf8_fstream.hpp"
 
 #include <chrono>
 #include <fstream>
@@ -45,8 +46,9 @@ bool FileLock::try_lock(int timeout_ms) {
     while (true) {
 #ifdef _WIN32
         // Create/open the lock file
-        HANDLE h = CreateFileA(
-            path_.c_str(),
+        std::wstring wide_path = utf8_to_wide(path_);
+        HANDLE h = CreateFileW(
+            wide_path.c_str(),
             GENERIC_WRITE,
             0,           // no sharing = exclusive
             nullptr,

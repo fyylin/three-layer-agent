@@ -191,6 +191,28 @@ TEST(test_agent_config_from_json) {
     assert(cfg.max_atomic_retries == 3);
 }
 
+TEST(test_agent_config_round_trip_preserves_extended_fields) {
+    AgentConfig cfg;
+    cfg.default_model = "gpt-5.4";
+    cfg.supervisor_model.model = "gpt-5.4-mini";
+    cfg.supervisor_model.max_tokens = 512;
+    cfg.use_md_prompts = false;
+    cfg.max_cost_per_run_usd = 12.5;
+    cfg.max_tokens_per_run = 4096;
+
+    nlohmann::json j;
+    to_json(j, cfg);
+
+    AgentConfig restored;
+    from_json(j, restored);
+
+    assert(restored.default_model == "gpt-5.4");
+    assert(restored.supervisor_model.model == "gpt-5.4-mini");
+    assert(restored.supervisor_model.max_tokens == 512);
+    assert(restored.use_md_prompts == false);
+    assert(restored.max_cost_per_run_usd == 12.5);
+    assert(restored.max_tokens_per_run == 4096);
+}
 TEST(test_failed_result_has_error) {
     AtomicResult r;
     r.task_id = "atomic-fail";
@@ -218,6 +240,7 @@ int main() {
     RUN(test_final_result_serialisation);
     RUN(test_agent_config_defaults);
     RUN(test_agent_config_from_json);
+    RUN(test_agent_config_round_trip_preserves_extended_fields);
     RUN(test_failed_result_has_error);
     std::cout << "All tests passed.\n";
     return 0;

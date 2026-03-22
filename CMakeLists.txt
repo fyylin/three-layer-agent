@@ -40,11 +40,18 @@ else()
 endif()
 
 find_package(Threads REQUIRED)
+# SQLite3 disabled on Windows to avoid MSYS2 header conflicts
+if(NOT WIN32)
+    find_package(SQLite3 QUIET)
+endif()
 
 # -- Source lists --------------------------------------------------------------
 set(AGENT_SOURCES
     src/agent/models.cpp
     src/agent/tool_registry.cpp
+    src/agent/tool_cache.cpp
+    src/agent/parallel_executor.cpp
+    src/agent/async_message_bus.cpp
     src/agent/worker_agent.cpp
     src/agent/manager_agent.cpp
     src/agent/director_agent.cpp
@@ -53,6 +60,25 @@ set(AGENT_SOURCES
     src/agent/reflection.cpp
     src/agent/skill_registry.cpp
     src/agent/manager_pool.cpp
+    src/agent/task_router.cpp
+    src/agent/task_context.cpp
+    src/agent/preflight_checker.cpp
+    src/agent/dependency_analyzer.cpp
+    src/agent/experience_db.cpp
+    src/agent/retry_policy.cpp
+    src/agent/circuit_breaker.cpp
+    src/agent/request_deduplicator.cpp
+    src/agent/event_bus.cpp
+    src/agent/worker_executor.cpp
+    src/agent/manager_dispatcher.cpp
+    src/agent/director_decomposer.cpp
+    src/agent/file_type_handler.cpp
+    src/agent/conversation_context.cpp
+    src/agent/tool_composer.cpp
+    src/agent/global_summary.cpp
+    src/cli/command_system.cpp
+    src/cli/command_registry.cpp
+    src/cli/readline_helper.cpp
     src/utils/logger.cpp
     src/utils/message_bus.cpp
     src/utils/memory_store.cpp
@@ -62,6 +88,11 @@ set(AGENT_SOURCES
     src/utils/tool_set.cpp
     src/indexer/simple_indexer.cpp
     src/indexer/indexer_tools.cpp
+    src/indexer/sqlite_indexer.cpp
+    src/indexer/treesitter_indexer.cpp
+    src/api/batch_api_client.cpp
+    src/utils/token_budget_allocator.cpp
+    src/utils/experience_replay_engine.cpp
 )
 
 set(AGENT_SOURCES_FULL
@@ -73,6 +104,10 @@ set(AGENT_SOURCES_FULL
 add_library(agent_core STATIC ${AGENT_SOURCES_FULL})
 target_include_directories(agent_core PUBLIC ${AGENT_INCLUDES})
 target_link_libraries(agent_core PUBLIC ${PLATFORM_LIBS} Threads::Threads)
+if(SQLite3_FOUND)
+    target_link_libraries(agent_core PUBLIC SQLite::SQLite3)
+    target_compile_definitions(agent_core PUBLIC HAVE_SQLITE3)
+endif()
 if(WARN_FLAGS)
     target_compile_options(agent_core PRIVATE ${WARN_FLAGS}
         $<$<CONFIG:Release>:-O2>
@@ -83,6 +118,7 @@ endif()
 add_library(agent_stub STATIC
     ${AGENT_SOURCES}           # all agent + utils (including tool_set.cpp)
     tests/stub_api_client.cpp  # stub replaces api_client.cpp
+    src/utils/multimodal_handler.cpp
 )
 target_include_directories(agent_stub PUBLIC ${AGENT_INCLUDES})
 target_link_libraries(agent_stub PUBLIC Threads::Threads)
@@ -102,6 +138,16 @@ if(WARN_FLAGS)
         $<$<CONFIG:Release>:-O2>
         $<$<CONFIG:Debug>:-g -O0>)
 endif()
+add_custom_command(TARGET agent_runner POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:agent_runner>/config"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:agent_runner>/prompts"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/config/agent_config.json"
+            "$<TARGET_FILE_DIR:agent_runner>/config/agent_config.json"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/prompts"
+            "$<TARGET_FILE_DIR:agent_runner>/prompts"
+)
 
 # -- Tests ----------------------------------------------------------------------
 enable_testing()
@@ -126,7 +172,22 @@ add_agent_test(test_manager     tests/test_manager.cpp)
 add_agent_test(test_director    tests/test_director.cpp)
 add_agent_test(test_v2_infra       tests/test_v2_infra.cpp)
 add_agent_test(test_skill_registry tests/test_skill_registry.cpp)  # links agent_stub (has tool_set)
+add_agent_test(test_phase_integration tests/test_phase_integration.cpp)
+add_agent_test(test_chinese_support tests/test_chinese_support.cpp)
+add_agent_test(test_getcwd_chinese tests/test_getcwd_chinese.cpp)
+add_agent_test(test_all_tools_chinese tests/test_all_tools_chinese.cpp)
+add_agent_test(test_workspace_chinese tests/test_workspace_chinese.cpp)
+add_agent_test(test_improvements tests/test_improvements.cpp)
+add_agent_test(test_phase2 tests/test_phase2.cpp)
+add_agent_test(test_integration tests/test_integration.cpp)
 
 install(TARGETS agent_runner DESTINATION bin)
 install(DIRECTORY prompts/ DESTINATION share/three_layer_agent/prompts)
 install(DIRECTORY config/  DESTINATION share/three_layer_agent/config)
+add_executable(test_indexer_demo test_indexer_demo.cpp)
+target_include_directories(test_indexer_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_indexer_demo PRIVATE agent_stub)
+
+add_executable(test_real_indexer tests/test_real_indexer.cpp)
+target_include_directories(test_real_indexer PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_real_indexer PRIVATE agent_stub)

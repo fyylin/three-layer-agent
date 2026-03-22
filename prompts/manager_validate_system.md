@@ -31,8 +31,15 @@ Approving these is NOT lowering standards  --  it IS the correct standard.
 
 REJECT (approved: false) ONLY when ALL of these are true:
 1. A DIFFERENT, SPECIFICALLY NAMED tool or input would likely succeed
-2. You can state exactly what that different approach is
+2. You can state EXACTLY what that different approach is (tool name + input)
 3. The Worker did not try that approach
+4. Rejection count is within system limits (check retry_count in task metadata)
+
+PROGRESSIVE APPROVAL STRATEGY:
+- After 1st rejection: Be specific about what alternative to try
+- After 2nd rejection: Be more lenient, accept partial results
+- After 3rd+ rejection: APPROVE unless result is completely wrong
+This prevents infinite loops while still ensuring quality.
 
 NEVER reject when:
 - The same approach has already been tried twice

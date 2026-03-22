@@ -13,6 +13,7 @@
 #include "agent/api_client.hpp"
 #include "utils/logger.hpp"
 #include <nlohmann/json.hpp>
+#include <functional>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -325,6 +326,23 @@ std::string ApiClient::complete(const std::string& sys,
     return extract_text(raw, tid);
 }
 
+void ApiClient::complete_stream(const std::string& sys,
+                                const std::string& user,
+                                std::function<void(const std::string&)> on_chunk,
+                                const std::string& tid) {
+    std::string body = (cfg_.provider == Provider::Anthropic)
+        ? build_anthropic_body(sys, {{"user",user}})
+        : build_openai_body(sys, {{"user",user}});
+
+    // Add stream parameter by string manipulation (MSVC nlohmann::json bool issue)
+    size_t pos = body.rfind('}');
+    if (pos != std::string::npos) {
+        body.insert(pos, ",\"stream\":true");
+    }
+
+    http_post_stream(body, on_chunk);
+}
+
 // -----------------------------------------------------------------------------
 // Retry wrapper
 // -----------------------------------------------------------------------------
@@ -474,6 +492,64 @@ std::pair<int,std::string> ApiClient::http_post(const std::string& body){
     return {(int)status,rbody};
 }
 
+void ApiClient::http_post_stream(const std::string& body, std::function<void(const std::string&)> on_chunk){
+    auto ep = resolve_endpoint();
+    WHandle session(WinHttpOpen(L"ThreeLayerAgent/2.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0));
+    if(!session) throw NetworkException("WinHttpOpen: "+win_err(GetLastError()));
+
+    int cto=cfg_.connect_timeout*1000, rto=cfg_.request_timeout*1000;
+    WinHttpSetTimeouts(session.h,cto,cto,rto,rto);
+
+    std::wstring whost=to_wide(ep.host);
+    WHandle conn(WinHttpConnect(session.h,whost.c_str(),(INTERNET_PORT)ep.port,0));
+    if(!conn) throw NetworkException("WinHttpConnect: "+win_err(GetLastError()));
+
+    DWORD flags=ep.tls?WINHTTP_FLAG_SECURE:0;
+    std::wstring wpath=to_wide(ep.path);
+    WHandle req(WinHttpOpenRequest(conn.h,L"POST",wpath.c_str(),nullptr,
+                                   WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,flags));
+    if(!req) throw NetworkException("WinHttpOpenRequest: "+win_err(GetLastError()));
+
+    std::string hdr_str=build_headers_str();
+    std::wstring whdr=to_wide(hdr_str);
+    WinHttpAddRequestHeaders(req.h,whdr.c_str(),(DWORD)whdr.size(),WINHTTP_ADDREQ_FLAG_ADD);
+
+    if(!WinHttpSendRequest(req.h,WINHTTP_NO_ADDITIONAL_HEADERS,0,
+                           (LPVOID)body.data(),(DWORD)body.size(),(DWORD)body.size(),0))
+        throw NetworkException("WinHttpSendRequest: "+win_err(GetLastError()));
+    if(!WinHttpReceiveResponse(req.h,nullptr))
+        throw NetworkException("WinHttpReceiveResponse: "+win_err(GetLastError()));
+
+    std::string buffer; DWORD avail=0;
+    while(WinHttpQueryDataAvailable(req.h,&avail)&&avail>0){
+        std::vector<char> buf(avail+1,'\0'); DWORD read=0;
+        if(!WinHttpReadData(req.h,buf.data(),avail,&read)) break;
+        buffer.append(buf.data(),read);
+
+        size_t pos;
+        while((pos=buffer.find('\n'))!=std::string::npos){
+            std::string line=buffer.substr(0,pos);
+            buffer.erase(0,pos+1);
+            if(line.substr(0,6)=="data: "){
+                std::string data=line.substr(6);
+                if(data=="[DONE]") return;
+                try{
+                    auto j=nlohmann::json::parse(data);
+                    if(cfg_.provider==Provider::Anthropic){
+                        if(j.contains("delta")&&j["delta"].contains("text"))
+                            on_chunk(j["delta"]["text"].get<std::string>());
+                    }else{
+                        if(j.contains("choices")&&!j["choices"].empty()&&
+                           j["choices"][0].contains("delta")&&j["choices"][0]["delta"].contains("content"))
+                            on_chunk(j["choices"][0]["delta"]["content"].get<std::string>());
+                    }
+                }catch(...){}
+            }
+        }
+    }
+}
+
 #else // Linux/macOS  --  POSIX + OpenSSL
 
 namespace {
@@ -580,6 +656,64 @@ std::pair<int,std::string> ApiClient::http_post(const std::string& body){
     std::string rs=req.str();
     if(!conn.write_all(rs.data(),rs.size())) throw NetworkException("HTTP write failed");
     return conn.read_response();
+}
+
+void ApiClient::http_post_stream(const std::string& body, std::function<void(const std::string&)> on_chunk){
+    auto ep=resolve_endpoint();
+    TlsConn conn;
+    bool ok = ep.tls
+        ? conn.connect_tls(ep.host, ep.port, cfg_.connect_timeout)
+        : conn.connect_plain(ep.host, ep.port, cfg_.connect_timeout);
+    if(!ok) throw NetworkException("Cannot connect to "+ep.host+":"+std::to_string(ep.port));
+
+    std::ostringstream req;
+    req<<"POST "<<ep.path<<" HTTP/1.1\r\n"
+       <<"Host: "<<ep.host<<"\r\n"
+       <<build_headers_str()
+       <<"content-length: "<<body.size()<<"\r\n"
+       <<"connection: close\r\n\r\n"
+       <<body;
+    std::string rs=req.str();
+    if(!conn.write_all(rs.data(),rs.size())) throw NetworkException("HTTP write failed");
+
+    std::string buffer; char buf[4096]; int n;
+    auto read_chunk=[&]()->int{
+        if(conn.ssl) return SSL_read(conn.ssl,buf,sizeof(buf));
+        return (int)::read(conn.fd,buf,sizeof(buf));
+    };
+    bool header_done=false;
+    while((n=read_chunk())>0){
+        buffer.append(buf,(size_t)n);
+        if(!header_done){
+            auto hend=buffer.find("\r\n\r\n");
+            if(hend!=std::string::npos){
+                buffer.erase(0,hend+4);
+                header_done=true;
+            }
+        }
+        if(header_done){
+            size_t pos;
+            while((pos=buffer.find('\n'))!=std::string::npos){
+                std::string line=buffer.substr(0,pos);
+                buffer.erase(0,pos+1);
+                if(line.substr(0,6)=="data: "){
+                    std::string data=line.substr(6);
+                    if(data=="[DONE]") return;
+                    try{
+                        auto j=nlohmann::json::parse(data);
+                        if(cfg_.provider==Provider::Anthropic){
+                            if(j.contains("delta")&&j["delta"].contains("text"))
+                                on_chunk(j["delta"]["text"].get<std::string>());
+                        }else{
+                            if(j.contains("choices")&&!j["choices"].empty()&&
+                               j["choices"][0].contains("delta")&&j["choices"][0]["delta"].contains("content"))
+                                on_chunk(j["choices"][0]["delta"]["content"].get<std::string>());
+                        }
+                    }catch(...){}
+                }
+            }
+        }
+    }
 }
 #endif // platform
 

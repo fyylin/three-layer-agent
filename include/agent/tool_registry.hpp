@@ -8,6 +8,7 @@
 // =============================================================================
 
 #include "agent/exceptions.hpp"
+#include "agent/tool_cache.hpp"
 #include <functional>
 #include <shared_mutex>
 #include <string>
@@ -45,6 +46,7 @@ public:
 private:
     mutable std::shared_mutex                      mu_;
     std::unordered_map<std::string, ToolFn>        tools_;
+    mutable ToolCache                              cache_;
 };
 
 } // namespace agent

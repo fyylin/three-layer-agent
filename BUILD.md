@@ -1,183 +1,154 @@
-# Three-Layer Agent System  --  Build Guide
+# Three-Layer Agent System - Build Guide
 
 ## Requirements
 
-| Platform | Compiler   | Dependencies          |
-|----------|------------|-----------------------|
-| Windows  | MSVC 2019+ | WinHTTP (built-in)    |
-| Linux    | GCC 10+    | OpenSSL, pthread      |
-| macOS    | Clang 12+  | OpenSSL, pthread      |
+| Platform | Compiler | Dependencies |
+|----------|----------|--------------|
+| Windows  | MSVC 2019+ / Visual Studio 2022 | WinHTTP (built-in) |
+| Linux    | GCC 10+ | OpenSSL, pthread |
+| macOS    | Clang 12+ | OpenSSL, pthread |
 
-## Windows (Visual Studio 2022)
+## Windows Build
 
 ```powershell
 cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release --parallel
 ```
 
-## Linux / macOS
+Artifacts are produced under `build\Release\`.
+After build, `agent_runner.exe` can be launched directly from that directory.
+The build copies `config/agent_config.json` and `prompts/` next to the executable.
+
+## Linux / macOS Build
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
 
+Default executable path:
+
+- Linux/macOS: `build/agent_runner`
+
 ## First-Time Setup
 
-```bash
-# Interactive configuration wizard (9 steps)
-./build/Release/agent_runner.exe --setup       # Windows
-./build/agent_runner              --setup       # Linux
+### Option 1: interactive setup wizard
 
-# Or set API key directly
-$env:ANTHROPIC_API_KEY = "sk-ant-..."           # Windows
-export ANTHROPIC_API_KEY="sk-ant-..."           # Linux
+```bash
+# Windows
+build\Release\agent_runner.exe --setup
+
+# Linux/macOS
+./build/agent_runner --setup
 ```
 
-## Usage
+### Option 2: edit the committed template
+
+The repository includes a public-safe template at `config/agent_config.json`.
+Before real use, either:
+
+- run `agent_runner --setup`
+- edit `config/agent_config.json`
+- or pass a separate config file with `-c`
+
+### Option 3: set the API key through the environment
+
+```powershell
+$env:ANTHROPIC_API_KEY = "sk-ant-..."
+```
 
 ```bash
-# Interactive conversation loop (default)
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+## Running
+
+```bash
+# Interactive mode
 agent_runner
 
 # Single goal
-agent_runner -g "查看桌面上有哪些文件"
+agent_runner -g "list current directory"
 
 # Custom config and workspace
 agent_runner -c my_config.json -w ./my_workspace -g "your goal"
 
-# Debug mode (shows raw LLM responses)
+# Debug mode
 agent_runner --debug -g "your goal"
 
-# Lightweight mode (no workspace/logging)
-agent_runner --no-workspace -g "your goal"
+# Prompt and skill listing
+agent_runner --list-prompts
+agent_runner --list-skills
 ```
 
-## Architecture (v2)
+## Testing
 
-```
-User Input
-  └-- SupervisorAgent (Layer 0)
-        - Monitor thread: polls state.json, listens to MessageBus
-        - On failure: consults AdvisorAgent for root-cause analysis
-        - Injects corrections via MessageBus to Workers/Managers
-        - Stuck agent detection with escalation (correction → cancel)
-        └-- DirectorAgent (Layer 1)
-              - Decomposes goal into parallel SubTasks
-              - Dispatches ManagerAgents, reviews results, synthesises answer
-              - Writes workspace/director/subtasks.json
-              └-- ManagerAgent × N (Layer 2, parallel)
-                    - Decomposes SubTask into AtomicTasks
-                    - Dispatches Workers in parallel
-                    - Validates results
-                    - Caches to shared session memory
-                    └-- WorkerAgent × M (Layer 3, parallel)
-                          - Executes one AtomicTask
-                          - Calls one tool per task
-                          - Reads corrections from MessageBus
-                          - Reports progress to Manager
+```bash
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-## Built-in Tools (12)
+For targeted rebuilds during development:
 
-| Category   | Tool              | Input                        | Output                           |
-|------------|-------------------|------------------------------|----------------------------------|
-| Filesystem | list_dir          | "Desktop" or path            | [DIR]/[FILE] listing with sizes  |
-| Filesystem | stat_file         | path                         | JSON metadata                    |
-| Filesystem | find_files        | "dir\npattern"               | Matching paths                   |
-| Filesystem | read_file         | path                         | File text (up to 64KB)           |
-| Filesystem | write_file        | "path\ncontent"              | Confirmation                     |
-| Filesystem | delete_file       | path                         | Confirmation                     |
-| System     | get_env           | VAR_NAME                     | Value or "(not set)"             |
-| System     | get_sysinfo       | "" (ignored)                 | JSON: OS, hostname, CPU, memory  |
-| System     | get_process_list  | "" or filter substring       | "PID  name" per line             |
-| System     | get_current_dir   | "" (ignored)                 | Current working directory        |
-| Shell      | run_command       | Shell command string         | stdout+stderr + exit code        |
-| Utility    | echo              | Any text                     | Same text                        |
-
-**Note:** `run_command` blocks: rm -rf, del /f/s, format, mkfs, shutdown, reboot, and similar.
-
-## Workspace Layout
-
-```
-workspace/
-└-- run-001/
-    ├-- global.log          NDJSON structured log (all agents)
-    ├-- state.json          All agent states (Supervisor reads this)
-    ├-- result.json         FinalResult after completion
-    ├-- shared/             Cross-agent resource exchange
-    ├-- memory/
-    │   ├-- session.json    Session KV memory
-    │   └-- long_term/      LLM-generated summaries (if enabled)
-    ├-- director/
-    │   ├-- agent.log
-    │   └-- subtasks.json
-    ├-- mgr-N/
-    │   └-- agent.log
-    └-- wkr-N/
-        ├-- agent.log
-        └-- artifacts/      Files written by write_file (sandboxed)
+```bash
+cmake --build build --config Release --target agent_runner test_models test_director --parallel
 ```
 
-## Configuration
+## Configuration Notes
 
-Key fields in `config/agent_config.json`:
+Important fields in `config/agent_config.json`:
 
 ```json
 {
   "provider": "anthropic|openai|azure|ollama|custom",
-  "api_key":  "sk-...",
+  "api_key": "YOUR_API_KEY_HERE",
   "default_model": "claude-opus-4-5-20251101",
+  "director_model": {},
+  "manager_model": {},
+  "worker_model": {},
+  "supervisor_model": {},
+  "prompt_dir": "./prompts",
   "workspace_dir": "./workspace",
-  "memory_session_enabled": true,
-  "memory_long_term_enabled": false,
-  "supervisor_advisor_enabled": true,
-  "supervisor_max_retries": 2,
-  "supervisor_stuck_timeout_ms": 300000
+  "use_md_prompts": true,
+  "max_cost_per_run_usd": 0.0,
+  "max_tokens_per_run": 0
 }
 ```
 
-Run `agent_runner --setup` for the interactive 9-step wizard.
+Currently supported environment override:
 
-## Environment Variables
-
-| Variable          | Description                              |
-|-------------------|------------------------------------------|
-| ANTHROPIC_API_KEY | Overrides api_key in config              |
-| AGENT_DUMP_AUDIT  | Set to "1" to print full audit trail     |
+| Variable | Description |
+|----------|-------------|
+| `ANTHROPIC_API_KEY` | Overrides `api_key` in config |
+| `AGENT_DUMP_AUDIT` | Prints extended audit trail when set to `1` |
 
 ## Prompt Customization
 
-Customize agent behavior by editing files in `prompts/`:
+Prompt files live under `prompts/`.
+Typical structure:
 
-| File | Purpose |
-|------|---------|
-| `prompts/base.md` | Shared safety rules for all agents |
-| `prompts/<agent>/SOUL.md` | Agent identity and communication style |
-| `prompts/<agent>/skills/*.md` | Agent-specific capabilities |
-| `prompts/skills/*.md` | Cross-agent skills (file_ops, system_ops, etc.) |
-| `prompts/AGENTS.md` | Project context (copy to your working directory) |
+```text
+prompts/
+  base.md
+  AGENTS.md
+  director/
+  manager/
+  worker/
+  supervisor/
+  skills/
+```
+
+Useful commands:
 
 ```bash
-# List all available prompts
-./agent_runner --list-prompts
-
-# List cross-agent skills
-./agent_runner --list-skills
+agent_runner --list-prompts
+agent_runner --list-skills
 ```
 
-To add a new skill, create a `.md` file in `prompts/skills/` with YAML frontmatter:
+## Release Notes for Maintainers
 
-```markdown
----
-name: my-skill
-role: cross-agent-skill
-version: 1.0.0
-description: What this skill does and when to use it
----
+Before publishing a build or source release:
 
-# My Skill
-
-## When to load this skill
-...
-```
+- confirm `config/agent_config.json` contains no real secrets
+- do not upload `workspace/` runtime data
+- do not rely on `build_full_recheck/` artifacts for distribution
+- run the Release test suite at least once on the final source tree

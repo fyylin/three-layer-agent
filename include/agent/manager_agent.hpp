@@ -17,6 +17,7 @@
 #include "agent/imanager.hpp"
 #include "agent/worker_agent.hpp"
 #include "agent/agent_context.hpp"
+#include "agent/dependency_analyzer.hpp"
 #include "utils/thread_pool.hpp"
 
 #include <memory>
@@ -29,7 +30,7 @@ class ManagerAgent final : public IManager {
 public:
     ManagerAgent(std::string               id,
                  ApiClient&                client,
-                 std::vector<WorkerAgent*> workers,
+                 std::vector<std::shared_ptr<WorkerAgent>> workers,
                  ThreadPool&               pool,
                  std::string               decompose_prompt,
                  std::string               validate_prompt,
@@ -43,13 +44,14 @@ public:
 private:
     std::string               id_;
     ApiClient&                client_;
-    std::vector<WorkerAgent*> workers_;
+    std::vector<std::shared_ptr<WorkerAgent>> workers_;
     ThreadPool&               pool_;
     std::string               decompose_prompt_;
     std::string               validate_prompt_;
     std::vector<std::string>  available_tools_;
     int                       max_atomic_retries_;
-    AgentContext              ctx_;   // ← v2
+    AgentContext              ctx_;
+    DependencyAnalyzer        dep_analyzer_;
 
     [[nodiscard]] std::vector<AtomicTask> decompose(
         const SubTask& task,
@@ -64,7 +66,7 @@ private:
     [[nodiscard]] std::pair<bool,std::string> validate(
         const SubTask& task, const std::vector<AtomicResult>& results) const;
 
-    [[nodiscard]] WorkerAgent* select_worker(
+    [[nodiscard]] std::shared_ptr<WorkerAgent> select_worker(
         const std::string& tool, size_t hint) const noexcept;
 
     [[nodiscard]] static std::string build_summary(

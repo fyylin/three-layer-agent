@@ -12,6 +12,7 @@
 
 #include "agent/exceptions.hpp"
 #include "agent/models.hpp"
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -64,6 +65,14 @@ public:
         const std::vector<Message>& history,
         const std::string&          task_id = "");
 
+    // Streaming API - callback receives each chunk as it arrives
+    using ChunkCallback = std::function<void(const std::string&)>;
+    void complete_stream(
+        const std::string& system_prompt,
+        const std::string& user_message,
+        ChunkCallback      on_chunk,
+        const std::string& task_id = "");
+
     // Change model/params at runtime (e.g. per-layer spec)
     void reconfigure(const ApiConfig& cfg) { cfg_ = cfg; }
     [[nodiscard]] const ApiConfig& config() const noexcept { return cfg_; }
@@ -94,6 +103,8 @@ private:
 
     [[nodiscard]] std::pair<int,std::string> http_post(
         const std::string& body);
+
+    void http_post_stream(const std::string& body, ChunkCallback on_chunk);
 
     [[nodiscard]] std::string extract_text(
         const std::string& raw, const std::string& task_id) const;

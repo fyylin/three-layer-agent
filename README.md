@@ -1,250 +1,243 @@
 # Three-Layer Agent System
 
-A **production-grade, multi-layer AI agent framework** written in C++17.
-Agents decompose goals, delegate work, review results, and learn from experience — all without human intervention.
+A multi-layer AI agent framework written in C++17.
+It decomposes user goals, delegates work across Director, Manager, and Worker agents, and uses a Supervisor layer for quality control, retries, and stuck-agent intervention.
 
-> Built on the Anthropic API. Runs on Windows and Linux.
+## Highlights
 
----
+- Multi-layer execution pipeline: Supervisor -> Director -> Manager -> Worker
+- Built-in filesystem, system, and shell tools
+- Prompt-driven behavior under `prompts/`, with Markdown skill files and no recompile required for prompt changes
+- Windows-focused UTF-8 path handling, including Chinese path support in key runtime and tooling paths
+- Portable runtime layout: the built executable can load `config/` and `prompts/` from the build output directory
+- Public-safe committed config template in `config/agent_config.json`
+- Full Release test suite currently passes with `ctest`
 
 ## Architecture
 
+```text
+User Input
+  -> SupervisorAgent
+       - quality gate
+       - stuck detection
+       - advisor-assisted retries
+       - correction injection
+    -> DirectorAgent
+         - classify complexity
+         - decompose goal into subtasks
+         - dispatch managers
+         - review and synthesise final answer
+      -> ManagerAgent x N
+           - decompose subtask into atomic tasks
+           - validate outputs
+           - coordinate workers
+        -> WorkerAgent x M
+             - execute one atomic task
+             - use tools directly when possible
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Supervisor  — quality gate, stuck detection, advisor   │
-│  ┌───────────────────────────────────────────────────┐  │
-│  │  Director  — decompose goals → subtasks → review  │  │
-│  │  ┌─────────────────┐  ┌─────────────────┐        │  │
-│  │  │  Manager A       │  │  Manager B       │  ...  │  │
-│  │  │  ┌────┐ ┌────┐  │  │  ┌────┐ ┌────┐  │        │  │
-│  │  │  │Wkr1│ │Wkr2│  │  │  │Wkr3│ │Wkr4│  │        │  │
-│  │  │  └────┘ └────┘  │  │  └────┘ └────┘  │        │  │
-│  │  └─────────────────┘  └─────────────────┘        │  │
-│  └───────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
+
+## Core Capabilities
+
+- Goal decomposition and hierarchical execution
+- Prompt-based routing and behavior control
+- Shared workspace, memory, and structured logs
+- Session memory and optional long-term memory
+- Configurable model/provider settings per layer
+- Optional code indexing components and supporting utilities
+- Supervisor review tuned for practical, evidence-based acceptance
+
+## Repository Layout
+
+```text
+config/        Runtime config template
+include/       Public headers
+prompts/       Agent prompts and skills
+src/           Implementation
+tests/         Automated tests
+docs/          Design notes and implementation writeups
+build/         Generated build output (not for source control)
+workspace/     Runtime state and artifacts
 ```
-
-| Layer | Role | LLM |
-|-------|------|-----|
-| Supervisor | Quality control, stuck detection | haiku |
-| Director | Goal decomposition, review, synthesis | sonnet |
-| Manager | Subtask → atomic tasks, validation | haiku |
-| Worker | Single tool call, ReAct chain | haiku |
-
-**RouterLLM** routes each layer to the most cost-effective model (~90% cost reduction vs all-opus).
-
----
-
-## Features
-
-- **Tool Fast-Path**: tool results returned directly — no LLM needed to "format" them  
-- **Conversation management**: `/new` starts a fresh conversation; history is preserved
-- **EXPERIENCE.md**: agents learn from successes/failures across conversations; patterns promote to skills automatically
-- **Fully customizable prompts**: every agent's behaviour defined in `prompts/**/*.md` (YAML frontmatter, no recompile needed)
-- **Cross-agent skills**: `prompts/skills/` — reusable skill files any agent can load
-- **WORKSPACE.md**: persistent, agent-writable log of what was accomplished
-- **Windows + Linux**: WinHTTP / POSIX sockets, Wide API throughout
-- **/health endpoint**: `localhost:8080/health` for monitoring integration
-- **173 automated tests** across 9 suites
-
----
 
 ## Quick Start
 
-### 1. Prerequisites
+### Requirements
 
 | Platform | Compiler | Notes |
 |----------|----------|-------|
-| Windows | MSVC 2019+ | Uses WinHTTP (built-in) |
-| Linux | GCC 10+ | Uses POSIX sockets |
-| macOS | Clang 12+ | Uses POSIX sockets |
+| Windows  | MSVC 2019+ / VS 2022 | Uses WinHTTP and wide-character Win32 APIs |
+| Linux    | GCC 10+  | Uses OpenSSL and pthread |
+| macOS    | Clang 12+ | Uses OpenSSL and pthread |
 
-### 2. Build
+### Build
 
-```bash
-# Clone
-git clone https://github.com/fyylin/three-layer-agent
-cd three-layer-agent
+Windows:
 
-# Configure
-cmake -B build -DCMAKE_BUILD_TYPE=Release          # Linux/macOS
-cmake -B build -G "Visual Studio 17 2022" -A x64  # Windows
-
-# Build
+```powershell
+cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release --parallel
 ```
 
-### 3. Configure
+Linux / macOS:
 
 ```bash
-# Interactive setup wizard
-./build/Release/agent_runner.exe --setup   # Windows
-./build/agent_runner --setup               # Linux
-
-# Or set API key directly
-export ANTHROPIC_API_KEY="sk-ant-..."      # Linux/macOS
-$env:ANTHROPIC_API_KEY = "sk-ant-..."     # Windows PowerShell
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
 ```
 
-> **Security**: Never commit `config/agent_config.json` if it contains your API key. It is in `.gitignore` by default.
+After build, start the executable from the build output directory:
 
-### 4. Run
+- Windows: `build\Release\agent_runner.exe`
+- Linux/macOS: `build/agent_runner`
+
+The build copies `config/agent_config.json` and `prompts/` next to the executable so the Release output can run directly.
+
+### First-Time Setup
+
+Option 1: run the setup wizard
 
 ```bash
-./build/agent_runner                          # Interactive mode
-./build/agent_runner -g "list current directory"  # Single goal
-./build/agent_runner --debug -g "your goal"   # Debug output
-./build/agent_runner --list-prompts           # Show all loaded prompts
-./build/agent_runner --list-skills            # Show cross-agent skills
+# Windows
+build\Release\agent_runner.exe --setup
+
+# Linux/macOS
+./build/agent_runner --setup
 ```
 
----
+Option 2: edit the committed template in `config/agent_config.json`
 
-## Workspace Layout
+Option 3: override the API key with an environment variable
 
-```
-workspace/
-  current/
-    files/              ← agent-created files (default output)
-    memory/
-      EXPERIENCE.md     ← cross-conversation learning (agent-readable)
-      long_term/        ← persistent memory summaries (.md)
-    WORKSPACE.md        ← session history (agent can read & write)
-    env_knowledge.md    ← discovered paths and facts
-  conversations/
-    conv-YYYYMMDD-xxx/  ← one directory per conversation
-      MEMORY.md         ← this conversation's memory
-      runs.md           ← all messages in this conversation
-      experience.md     ← experience from this conversation
-  logs/
-    activity.md         ← all activity, append-only (human-readable)
-    structured.ndjson   ← machine-readable logs
-```
-
----
-
-## Conversation Commands
-
-| Command | Effect |
-|---------|--------|
-| `/new` | Start a fresh conversation (history preserved in `conversations/`) |
-| `/conv` | Show current conversation ID |
-| `/workspace` | Display `WORKSPACE.md` |
-| `/experience` | Display `EXPERIENCE.md` (cross-conversation learning) |
-| `/help` | Show all commands |
-
----
-
-## Customizing Prompts
-
-All prompts are Markdown files with YAML frontmatter — no recompile needed.
-
-```
-prompts/
-  base.md                    ← shared safety rules (all agents)
-  AGENTS.md                  ← project context (copy to working dir)
-  director/SOUL.md           ← Director identity & style
-  director/skills/           ← Director-specific skills
-  manager/  worker/  supervisor/  (same structure)
-  skills/                    ← cross-agent skills
-    file_ops.md
-    system_ops.md
-    code_exec.md
-    memory_ops.md
-    analysis.md
-```
-
-To add a skill:
-
-```markdown
----
-name: my-skill
-role: cross-agent-skill
-version: 1.0.0
-description: Describe when to load this skill
----
-
-# My Skill
-
-## When to use
-...
+```powershell
+$env:ANTHROPIC_API_KEY = "sk-ant-..."
 ```
 
 ```bash
-./agent_runner --list-skills   # verify it appears
+export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
----
-
-## Experience & Skill Promotion
-
-Workers record experiences after every tool call. When a pattern is seen **≥3 times across different conversations** with **≥90% success rate**, it is automatically promoted to `prompts/skills/exp-<tool>.md`.
+## Running
 
 ```bash
-/experience   # view accumulated cross-conversation experience
+# Interactive mode
+agent_runner
+
+# Single goal
+agent_runner -g "list current directory"
+
+# Custom config and workspace
+agent_runner -c my_config.json -w ./my_workspace -g "your goal"
+
+# Debug mode
+agent_runner --debug -g "your goal"
+
+# Prompt and skill discovery
+agent_runner --list-prompts
+agent_runner --list-skills
 ```
-
----
-
-## Available Tools
-
-| Tool | Input | Output |
-|------|-------|--------|
-| `get_current_dir` | (empty) | Current working directory |
-| `list_dir` | path | Directory listing |
-| `read_file` | path | File contents |
-| `write_file` | `"path\ncontent"` | Writes file |
-| `find_files` | `"dir\npattern"` | Matching paths |
-| `stat_file` | path | Size, dates, type |
-| `delete_file` | `"CONFIRMED:path"` | Deletes file |
-| `run_command` | shell command | Command output |
-| `get_sysinfo` | (empty) | OS, CPU, RAM |
-| `get_process_list` | (empty) | Running processes |
-| `get_env` | VAR_NAME | Environment variable |
-| `create_tool` | `"name\ndesc\ncmd"` | Creates custom tool |
-| `list_tools` | (empty) | All available tools |
-
----
-
-## Testing
-
-```bash
-# Run all 173 tests
-cmake --build build --target test
-
-# Or compile and run individually
-g++ -std=c++17 -I include -I third_party \
-    src/agent/models.cpp tests/test_models.cpp -o /tmp/t && /tmp/t
-```
-
-Test suites: `test_models`, `test_thread_pool`, `test_worker`, `test_manager`,
-`test_director`, `test_v2_infra`, `test_skill_registry`, `test_integration`, `test_prompt_loader`
-
----
 
 ## Configuration
 
-`config/agent_config.json` (created by `--setup`):
+The repository includes a public-safe config template at `config/agent_config.json`.
+It is intended to be committed without secrets.
+
+Important fields include:
 
 ```json
 {
-  "api_key": "",                  // prefer ANTHROPIC_API_KEY env var
-  "default_model": "claude-opus-4-6",
-  "director_model": { "model": "claude-sonnet-4-6" },
-  "manager_model":  { "model": "claude-haiku-4-5-20251001" },
-  "worker_model":   { "model": "claude-haiku-4-5-20251001" },
-  "supervisor_model": { "model": "claude-haiku-4-5-20251001" },
+  "provider": "anthropic|openai|azure|ollama|custom",
+  "api_key": "YOUR_API_KEY_HERE",
+  "default_model": "claude-opus-4-5-20251101",
+  "director_model": {},
+  "manager_model": {},
+  "worker_model": {},
+  "supervisor_model": {},
   "prompt_dir": "./prompts",
   "workspace_dir": "./workspace",
-  "use_md_prompts": true
+  "use_md_prompts": true,
+  "max_cost_per_run_usd": 0.0,
+  "max_tokens_per_run": 0
 }
 ```
 
----
+Recommended practice:
+
+- Keep the committed template clean
+- Put personal overrides in a separate file such as `config/dev.local.json`
+- Pass that file explicitly with `-c`
+
+## Workspace Layout
+
+A typical runtime workspace looks like this:
+
+```text
+workspace/
+  run-001/
+    global.log
+    state.json
+    result.json
+    shared/
+    memory/
+    director/
+    mgr-N/
+    wkr-N/
+```
+
+## Prompts and Skills
+
+Prompts are loaded from `prompts/`.
+The system supports shared prompt rules, agent identity files, and per-role skills.
+
+Useful files:
+
+- `prompts/base.md`
+- `prompts/<agent>/SOUL.md`
+- `prompts/<agent>/skills/*.md`
+- `prompts/skills/*.md`
+- `prompts/AGENTS.md`
+
+This makes behavior iteration possible without recompiling the C++ code.
+
+## Built-in Tooling
+
+Main built-in tool groups include:
+
+- Filesystem: `list_dir`, `read_file`, `write_file`, `find_files`, `stat_file`, `delete_file`
+- System: `get_env`, `get_sysinfo`, `get_process_list`, `get_current_dir`
+- Shell: `run_command`
+- Utility: `echo`
+
+`run_command` includes blocking for clearly destructive commands.
+
+## Testing
+
+Run the Release suite after building:
+
+```bash
+ctest --test-dir build -C Release --output-on-failure
+```
+
+The current Release build in this repository passes the full registered test suite.
+
+## Documentation
+
+Start with these files:
+
+- [BUILD.md](BUILD.md) for build and setup
+- [CHANGELOG.md](CHANGELOG.md) for release history
+- [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines
+- [docs/README.md](docs/README.md) for design-note navigation
+
+## Security Notes
+
+- Do not commit real API keys or private endpoints
+- Review `config/agent_config.json` before publishing
+- Prefer a separate local config file for personal settings
+- Check generated `build/` and `workspace/` output before uploading archives or tags
 
 ## License
 
-[MIT](LICENSE) — see `LICENSE` for details.
+MIT. See [LICENSE](LICENSE).
 
 ## Contributing
 

@@ -16,6 +16,8 @@
 #include "agent/api_client.hpp"
 #include "agent/tool_registry.hpp"
 #include "agent/agent_context.hpp"
+#include "agent/preflight_checker.hpp"
+#include "utils/experience_manager.hpp"
 #include <string>
 
 namespace agent {
@@ -56,7 +58,8 @@ private:
     ToolRegistry& registry_;
     std::string   system_prompt_;
     int           max_retries_;
-    AgentContext  ctx_;              // ← v2
+    AgentContext  ctx_;
+    PreflightChecker preflight_;
 
     [[nodiscard]] std::string build_user_message(
         const AtomicTask&  task,
@@ -79,6 +82,9 @@ private:
 
     // v2: drain Supervisor correction messages from bus; return combined note
     [[nodiscard]] std::string drain_corrections() const noexcept;
+
+    // Classify tool failure into categories
+    [[nodiscard]] FailureCategory classify_failure(const std::string& error) const noexcept;
 
 };
 

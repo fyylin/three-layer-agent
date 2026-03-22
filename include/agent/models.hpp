@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <memory>
 #include <nlohmann/json.hpp>
 
 namespace agent {
@@ -31,15 +32,17 @@ enum class TaskStatus : uint8_t {
 // Layer 3 ↔ Layer 2
 // -----------------------------------------------------------------------------
 
+struct TaskContext;  // forward declaration
+
 struct AtomicTask {
     std::string id;
     std::string parent_id;
     std::string description;
     std::string tool;
     std::string input;
-    // DAG support: declare dependencies between atomic tasks
-    std::vector<std::string> depends_on;   // IDs of tasks that must complete first
-    std::string              input_from;   // copy output of this task_id into my input
+    std::vector<std::string> depends_on;
+    std::string input_from;
+    std::shared_ptr<TaskContext> context;  // shared context
 };
 
 struct AtomicResult {
@@ -65,6 +68,7 @@ struct SubTask {
     std::string description;
     std::string expected_output;
     std::string retry_feedback;
+    std::shared_ptr<TaskContext> context;
 };
 
 struct SubTaskReport {
@@ -84,7 +88,10 @@ void from_json(const nlohmann::json& j, SubTaskReport& r);
 // Layer 1
 // -----------------------------------------------------------------------------
 
-struct UserGoal    { std::string description; };
+struct UserGoal {
+    std::string description;
+    std::shared_ptr<TaskContext> context;
+};
 struct ReviewFeedback {
     std::string subtask_id;
     bool        approved = false;

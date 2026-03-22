@@ -1,4 +1,5 @@
 // =============================================================================
+#include "utils/utf8_fstream.hpp"
 // src/utils/tool_set.cpp   --   Comprehensive built-in tool implementations
 // =============================================================================
 
@@ -38,6 +39,26 @@
 
 namespace agent {
 
+#ifdef _WIN32
+static std::string wchar_to_utf8(const wchar_t* wstr) {
+    if (!wstr) return "";
+    int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return "";
+    std::string result(len - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, &result[0], len, nullptr, nullptr);
+    return result;
+}
+
+static std::wstring utf8_to_wchar(const std::string& str) {
+    if (str.empty()) return L"";
+    int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
+    if (len <= 0) return L"";
+    std::wstring result(len - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &result[0], len);
+    return result;
+}
+#endif
+
 // -- Path resolution ----------------------------------------------------------
 
 std::string resolve_path(const std::string& raw) {
@@ -52,7 +73,9 @@ std::string resolve_path(const std::string& raw) {
 
 #ifdef _WIN32
     auto expand = [](const std::string& s)->std::string {
-        char buf[MAX_PATH]={}; ExpandEnvironmentStringsA(s.c_str(),buf,MAX_PATH); return buf;
+        wchar_t buf[MAX_PATH]={};
+        ExpandEnvironmentStringsW(utf8_to_wchar(s).c_str(),buf,MAX_PATH);
+        return wchar_to_utf8(buf);
     };
     if (is_desktop || lower=="桌面") return expand("%USERPROFILE%\\Desktop");
     auto sw = [&](const std::string& pfx){
@@ -127,17 +150,9 @@ std::string tool_list_dir(const std::string& path) {
     std::wstring wpat = wdir + L"\\*";
     WIN32_FIND_DATAW ffd;
     HANDLE h = FindFirstFileW(wpat.c_str(), &ffd);
-    if (h == INVALID_HANDLE_VALUE) {
-        // Fallback: try Desktop
-        WCHAR wbuf[MAX_PATH] = {};
-        ExpandEnvironmentStringsW(L"%USERPROFILE%\\Desktop", wbuf, MAX_PATH);
-        wdir = wbuf; wpat = wdir + L"\\*";
-        h = FindFirstFileW(wpat.c_str(), &ffd);
-        if (h == INVALID_HANDLE_VALUE)
-            throw std::runtime_error("list_dir: cannot open '" + dir + "'");
-        dir = wide_to_utf8(wbuf);
-    }
-    out << "[" << dir << "]\n";
+    if (h == INVALID_HANDLE_VALUE)
+        throw std::runtime_error("list_dir: cannot open '" + dir + "'");
+    out << "Directory: " << dir << "\n";
     do {
         std::string name = wide_to_utf8(ffd.cFileName);
         if (name == "." || name == "..") continue;
@@ -150,10 +165,6 @@ std::string tool_list_dir(const std::string& path) {
     FindClose(h);
 #else
     DIR* dp=opendir(dir.c_str());
-    if(!dp){
-        const char* he=std::getenv("HOME");
-        if(he){std::string fb=std::string(he)+"/Desktop";dp=opendir(fb.c_str());if(dp)dir=fb;}
-    }
     if(!dp) throw std::runtime_error("list_dir: cannot open '"+dir+"'. Hint: use \"Desktop\"");
     out<<"Directory: "<<dir<<"\n";
     struct dirent* ep;
@@ -186,8 +197,9 @@ std::string tool_run_command(const std::string& cmd) {
 
 #ifdef _WIN32
     // On Windows, use Wide API to handle Chinese paths in commands correctly
-    // Prefix with "cmd /u /c " to get Unicode output, then convert
-    std::string full_cmd = "cmd /u /c " + cmd + " 2>&1";
+    // For grep, use regular cmd since grep outputs UTF-8 directly
+    bool is_grep = (cmd.find("grep ") != std::string::npos);
+    std::string full_cmd = is_grep ? ("cmd /c " + cmd + " 2>&1") : ("cmd /u /c " + cmd + " 2>&1");
     // Convert UTF-8 command to Wide
     int wlen = MultiByteToWideChar(CP_UTF8, 0, full_cmd.c_str(), -1, nullptr, 0);
     std::wstring wcmd(wlen, L'\0');
@@ -219,7 +231,8 @@ std::string tool_run_command(const std::string& cmd) {
             CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
             CloseHandle(hRead);
             // cmd /u output is UTF-16LE; convert to UTF-8
-            if (raw.size() >= 2) {
+            // For grep, output is already in correct encoding, use as-is
+            if (!is_grep && raw.size() >= 2) {
                 const WCHAR* wout = (const WCHAR*)raw.data();
                 int n = WideCharToMultiByte(CP_UTF8, 0, wout, (int)(raw.size()/2),
                                              nullptr, 0, nullptr, nullptr);
@@ -372,7 +385,7 @@ std::string tool_read_file(const std::string& path) {
     std::string p=resolve_path(path);
 
 #ifdef _WIN32
-    // Wide API: handles UTF-8 Chinese paths correctly (std::ifstream(char*) uses ANSI)
+    // Wide API: handles UTF-8 Chinese paths correctly (agent::utf8_ifstream(char*) uses ANSI)
     int wlen = MultiByteToWideChar(CP_UTF8, 0, p.c_str(), -1, nullptr, 0);
     if (wlen <= 0) throw std::runtime_error("read_file: path encoding error: " + p);
     std::vector<wchar_t> wp(wlen);
@@ -394,7 +407,7 @@ std::string tool_read_file(const std::string& path) {
                    " bytes; showing first " + std::to_string(kMaxBytes) + " bytes]";
     return content;
 #else
-    std::ifstream f(p, std::ios::binary);
+    agent::utf8_ifstream f(p, std::ios::binary);
     if(!f.is_open()) throw std::runtime_error("read_file: cannot open: "+p);
     std::string content((std::istreambuf_iterator<char>(f)),
                          std::istreambuf_iterator<char>());
@@ -447,7 +460,7 @@ std::string tool_write_file(const std::string& input) {
         std::fclose(_fw);
     }
 #else
-    std::ofstream f(path);
+    agent::utf8_ofstream f(path);
     if(!f.is_open()) throw std::runtime_error("write_file: cannot open for writing: "+path);
     f<<content;
 #endif
@@ -593,7 +606,7 @@ std::string tool_get_process_list(const std::string& filter) {
         for(char c:std::string(ep->d_name)) if(!isdigit((unsigned char)c)){is_pid=false;break;}
         if(!is_pid)continue;
         std::string comm_path=std::string("/proc/")+ep->d_name+"/comm";
-        std::ifstream cf(comm_path); std::string name;
+        agent::utf8_ifstream cf(comm_path); std::string name;
         if(cf){std::getline(cf,name);}else continue;
         if(filter.empty()||name.find(filter)!=std::string::npos){
             out<<ep->d_name<<"  "<<name<<"\n"; ++count;
@@ -606,7 +619,9 @@ std::string tool_get_process_list(const std::string& filter) {
 
 std::string tool_get_current_dir(const std::string&) {
 #ifdef _WIN32
-    char buf[MAX_PATH]={}; GetCurrentDirectoryA(MAX_PATH,buf); return buf;
+    wchar_t buf[MAX_PATH]={};
+    GetCurrentDirectoryW(MAX_PATH,buf);
+    return wchar_to_utf8(buf);
 #else
     char buf[4096]={}; getcwd(buf,sizeof(buf)); return buf;
 #endif
@@ -668,7 +683,7 @@ void register_all_tools(ToolRegistry& registry) {
             std::string def_path = tools_dir + "/" + name + ".json";
             nlohmann::json def;
             def["name"] = name; def["description"] = desc; def["command"] = cmd_t;
-            std::ofstream f(def_path);
+            agent::utf8_ofstream f(def_path);
             if (f.is_open()) f << def.dump(2) << "\n";
             return "Tool '" + name + "' created. Definition saved to " + def_path + "\n"
                    "Usage: call " + name + " with your input. "
@@ -688,9 +703,9 @@ void register_all_tools(ToolRegistry& registry) {
             // List JSON files in workspace/tools/
             std::string td = "./workspace/tools";
 #ifdef _WIN32
-            WIN32_FIND_DATAA ffd; HANDLE h=FindFirstFileA((td+"\\*.json").c_str(),&ffd);
+            WIN32_FIND_DATAW ffd; HANDLE h=FindFirstFileW(utf8_to_wchar(td+"\\*.json").c_str(),&ffd);
             if (h!=INVALID_HANDLE_VALUE) {
-                do { out<<"  "<<ffd.cFileName<<"\n"; } while(FindNextFileA(h,&ffd));
+                do { out<<"  "<<wchar_to_utf8(ffd.cFileName)<<"\n"; } while(FindNextFileW(h,&ffd));
                 FindClose(h);
             }
 #else
@@ -767,7 +782,7 @@ void load_dynamic_tools(ToolRegistry& registry) {
     };
     do {
         std::string fname = w2u(ffd.cFileName);
-        std::ifstream f(td + "\\" + fname);
+        agent::utf8_ifstream f(td + "\\" + fname);
 #else
     DIR* dp = opendir(td.c_str());
     if (!dp) return;
@@ -775,7 +790,7 @@ void load_dynamic_tools(ToolRegistry& registry) {
     while ((ep = readdir(dp))) {
         std::string fname = ep->d_name;
         if (fname.size() < 5 || fname.substr(fname.size()-5) != ".json") continue;
-        std::ifstream f(td + "/" + fname);
+        agent::utf8_ifstream f(td + "/" + fname);
 #endif
         if (!f.is_open()) { continue; }
         try {

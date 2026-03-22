@@ -33,6 +33,17 @@
 #include "utils/workspace.hpp"
 #include "agent/skill_registry.hpp"
 #include "utils/structured_log.hpp"
+#include "utils/tool_stats.hpp"
+#include "utils/result_cache.hpp"
+#include "utils/incremental_engine.hpp"
+#include "utils/prompt_optimizer.hpp"
+#include "utils/multimodal_handler.hpp"
+#include "utils/token_budget_allocator.hpp"
+#include "utils/experience_replay_engine.hpp"
+#include "agent/tool_cache.hpp"
+#include "distributed/node_registry.hpp"
+#include "distributed/task_dispatcher.hpp"
+#include "api/batch_api_client.hpp"
 
 #include <atomic>
 #include <thread>
@@ -73,6 +84,16 @@ struct AgentContext {
     double                             budget_usd = 0.0;  // 0 = unlimited
     std::shared_ptr<EnvKnowledgeBase>  env_kb;           // environment facts (paths, etc.)
     std::shared_ptr<void>               exp_mgr_ptr;      // ExperienceManager (type-erased, optional)
+    std::shared_ptr<ToolStatsTracker>  tool_stats;       // tool performance tracking
+    std::shared_ptr<ResultCache>       result_cache;     // task result caching
+    std::shared_ptr<IncrementalEngine> incremental;      // incremental computation
+    std::shared_ptr<PromptOptimizer>        prompt_opt;       // adaptive prompt optimization
+    std::shared_ptr<TokenBudgetAllocator>   budget_alloc;     // token budget management (Phase 9)
+    std::shared_ptr<ExperienceReplayEngine> exp_replay;       // cross-session learning (Phase 10)
+    std::shared_ptr<ToolCache>              tool_cache;       // tool call caching
+    std::shared_ptr<NodeRegistry>           node_registry;    // distributed node management
+    std::shared_ptr<TaskDispatcher>         task_dispatcher;  // distributed task dispatch
+    std::shared_ptr<class GlobalSummary>    global_summary;   // global context shared across agents
 
     // -- Helpers -----------------------------------------------------------
 

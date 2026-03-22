@@ -18,6 +18,8 @@
 #include "utils/workspace.hpp"
 #include "utils/prompt_loader.hpp"
 #include "cli/commands.hpp"
+#include "cli/command_system.hpp"
+#include "cli/readline_helper.hpp"
 #include "utils/experience_manager.hpp"
 #include "utils/health_server.hpp"
 #include "utils/message_bus.hpp"
@@ -25,6 +27,7 @@
 #include "utils/structured_log.hpp"
 #include "utils/tool_set.hpp"
 #include "agent/skill_registry.hpp"
+#include "utils/utf8_fstream.hpp"
 #include "setup.hpp"
 
 #include <nlohmann/json.hpp>
@@ -33,7 +36,6 @@
 #include <signal.h>  // for sigaction (POSIX)
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -76,6 +78,58 @@ static void list_models() {
 static agent::ApiConfig make_layer_config(const agent::AgentConfig& cfg,
                                            const agent::ModelSpec& spec) {
     return agent::make_api_config(cfg, spec);
+}
+
+static std::filesystem::path executable_dir() {
+#ifdef _WIN32
+    wchar_t buf[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    if (len > 0)
+        return std::filesystem::path(buf).parent_path();
+#else
+    std::error_code ec;
+    auto p = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (!ec) return p.parent_path();
+#endif
+    return std::filesystem::current_path();
+}
+
+static std::string path_to_utf8(const std::filesystem::path& p) {
+#ifdef _WIN32
+    std::wstring ws = p.wstring();
+    if (ws.empty()) return "";
+    int len = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return "";
+    std::string out(len - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, &out[0], len, nullptr, nullptr);
+    return out;
+#else
+    return p.string();
+#endif
+}
+
+static std::string resolve_runtime_path(const std::string& raw) {
+    if (raw.empty()) return raw;
+
+    std::filesystem::path p(raw);
+    if (p.is_absolute() && std::filesystem::exists(p))
+        return path_to_utf8(p);
+
+    if (std::filesystem::exists(p))
+        return path_to_utf8(std::filesystem::absolute(p));
+
+    const auto exe_dir = executable_dir();
+    const std::filesystem::path candidates[] = {
+        exe_dir / p,
+        exe_dir.parent_path() / p,
+        exe_dir.parent_path().parent_path() / p
+    };
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::exists(candidate))
+            return path_to_utf8(std::filesystem::weakly_canonical(candidate));
+    }
+
+    return raw;
 }
 
 // -----------------------------------------------------------------------------
@@ -274,7 +328,7 @@ int main(int argc, char* argv[]) {
         }
         else if (arg=="--list-prompts") {
             // cfg not yet loaded at this point — use default prompts dir
-            std::string pd = "./prompts";
+            std::string pd = resolve_runtime_path("./prompts");
             agent::PromptLoader pl(pd);
             auto all = pl.list_all_meta();
             std::cout << "=== Prompts in " << pd << " ("
@@ -292,7 +346,7 @@ int main(int argc, char* argv[]) {
             return 0;
         }
         else if (arg=="--list-skills") {
-            std::string pd = "./prompts";
+            std::string pd = resolve_runtime_path("./prompts");
             agent::PromptLoader pl(pd);
             auto skills = pl.list_skills();
             std::cout << "=== Skills (" << skills.size() << " available) ===\n";
@@ -366,6 +420,8 @@ int main(int argc, char* argv[]) {
     }
 
     // -- Load config -----------------------------------------------------------
+    config_path = resolve_runtime_path(config_path);
+
     agent::AgentConfig cfg;
     try { cfg=agent::AgentConfig::load(config_path); }
     catch(const std::exception& e){
@@ -382,12 +438,14 @@ int main(int argc, char* argv[]) {
     if(do_debug){cfg.log_level="debug"; std::cerr<<"[DEBUG mode]\n\n";}
     agent::Logger::instance().set_level(cfg.log_level);
 
+    cfg.prompt_dir = resolve_runtime_path(cfg.prompt_dir);
+
     // -- Override workspace root from config if set ----------------------------
     if(cfg.workspace_dir.empty()) cfg.workspace_dir=workspace_root;
     else if(workspace_root!="workspace") cfg.workspace_dir=workspace_root; // CLI wins
 
     // -- Load prompts ----------------------------------------------------------
-    std::string dir_decompose, dir_review, dir_synth, dir_supervise;
+    std::string dir_decompose, dir_review, dir_synth, dir_classify, dir_supervise;
     std::string mgr_decompose, mgr_validate, wkr_system;
     try {
         const std::string& pd=cfg.prompt_dir;
@@ -401,18 +459,19 @@ int main(int argc, char* argv[]) {
             }
         }
         // Legacy .txt fallbacks for each role
-        std::string fb_dir_dec, fb_dir_rev, fb_dir_syn, fb_mgr_dec, fb_mgr_val, fb_wkr, fb_sup;
-        try { fb_dir_dec = agent::load_prompt(pd+"/director_decompose_system.txt"); } catch(...) {}
-        try { fb_dir_rev = agent::load_prompt(pd+"/director_review_system.txt");    } catch(...) {}
-        try { fb_dir_syn = agent::load_prompt(pd+"/director_synthesise_system.txt");} catch(...) {}
-        try { fb_mgr_dec = agent::load_prompt(pd+"/manager_decompose_system.txt");  } catch(...) {}
-        try { fb_mgr_val = agent::load_prompt(pd+"/manager_validate_system.txt");   } catch(...) {}
-        try { fb_wkr     = agent::load_prompt(pd+"/worker_system.txt");             } catch(...) {}
-        try { fb_sup     = agent::load_prompt(pd+"/supervisor_system.txt");         } catch(...) {}
+        std::string fb_dir_dec, fb_dir_rev, fb_dir_syn, fb_dir_cls, fb_mgr_dec, fb_mgr_val, fb_wkr, fb_sup;
+        try { fb_dir_dec = agent::load_prompt(pd+"/director_decompose_system.txt"); } catch(const std::exception& e) { LOG_WARN("Main","main","init","Failed to load director_decompose_system.txt: " + std::string(e.what())); }
+        try { fb_dir_rev = agent::load_prompt(pd+"/director_review_system.txt");    } catch(const std::exception& e) { LOG_WARN("Main","main","init","Failed to load director_review_system.txt: " + std::string(e.what())); }
+        try { fb_dir_syn = agent::load_prompt(pd+"/director_synthesise_system.txt");} catch(const std::exception& e) { LOG_WARN("Main","main","init","Failed to load director_synthesise_system.txt: " + std::string(e.what())); }
+        try { fb_mgr_dec = agent::load_prompt(pd+"/manager_decompose_system.txt");  } catch(const std::exception& e) { LOG_WARN("Main","main","init","Failed to load manager_decompose_system.txt: " + std::string(e.what())); }
+        try { fb_mgr_val = agent::load_prompt(pd+"/manager_validate_system.txt");   } catch(const std::exception& e) { LOG_WARN("Main","main","init","Failed to load manager_validate_system.txt: " + std::string(e.what())); }
+        try { fb_wkr     = agent::load_prompt(pd+"/worker_system.txt");             } catch(const std::exception& e) { LOG_WARN("Main","main","init","Failed to load worker_system.txt: " + std::string(e.what())); }
+        try { fb_sup     = agent::load_prompt(pd+"/supervisor_system.txt");         } catch(const std::exception& e) { LOG_WARN("Main","main","init","Failed to load supervisor_system.txt: " + std::string(e.what())); }
         // Assemble from .md (with .txt fallback)
         dir_decompose = pl.assemble("director-decompose",    fb_dir_dec);
         dir_review    = pl.assemble("director-review",       fb_dir_rev);
         dir_synth     = pl.assemble("director-synthesise",   fb_dir_syn);
+        dir_classify  = pl.assemble("director-classify",     fb_dir_cls);
         mgr_decompose = pl.assemble("manager-decompose",     fb_mgr_dec);
         mgr_validate  = pl.assemble("manager-validate",      fb_mgr_val);
         wkr_system    = pl.assemble("worker-core",           fb_wkr);
@@ -443,9 +502,9 @@ int main(int argc, char* argv[]) {
     {
         // Load env_knowledge from .md (replaces legacy .tsv)
         std::string env_kb_path = cfg.workspace_dir + "/current/env_knowledge.md";
-        if (!std::ifstream(env_kb_path).is_open())
+        if (!agent::utf8_ifstream(env_kb_path).is_open())
             env_kb_path = cfg.workspace_dir + "/env_knowledge.tsv";  // legacy fallback
-        std::ifstream ef(env_kb_path);
+        agent::utf8_ifstream ef(env_kb_path);
         if (ef.is_open()) {
             std::string data((std::istreambuf_iterator<char>(ef)),
                              std::istreambuf_iterator<char>());
@@ -461,12 +520,21 @@ int main(int argc, char* argv[]) {
     if(cfg.memory_session_enabled){
         std::string session_path=agent::WorkspaceManager::join(
             cfg.workspace_dir,"session.json");
-        try{ session_memory->load_session(session_path); }catch(...){}
+        try{ session_memory->load_session(session_path); }catch(const std::exception& e){ LOG_WARN("Main","main","init","Failed to load session: " + std::string(e.what())); }
         std::string lt_dir=agent::WorkspaceManager::join(cfg.workspace_dir,"long_term");
-        try{ session_memory->load_long_term(lt_dir); }catch(...){}
+        try{ session_memory->load_long_term(lt_dir); }catch(const std::exception& e){ LOG_WARN("Main","main","init","Failed to load long_term: " + std::string(e.what())); }
     }
 
     agent::ThreadPool pool(static_cast<size_t>(cfg.worker_threads));
+
+    // -- Initialize command system ---------------------------------------------
+    agent::cli::CommandSystem cmd_system;
+    agent::cli::register_all_commands(cmd_system);
+
+    // Initialize readline with command list
+    auto cmd_list = cmd_system.list_commands();
+    agent::cli::ReadlineHelper::init(cmd_list);
+    agent::cli::ReadlineHelper::set_command_system(&cmd_system);
 
     // -- Conversation loop -----------------------------------------------------
     std::vector<std::string> history;  // for multi-turn context
@@ -530,11 +598,7 @@ int main(int argc, char* argv[]) {
         if(first&&!goal_text.empty()){
             current_goal=goal_text; first=false;
         } else {
-            print_utf8("You: ");
-#ifdef _WIN32
-            fflush(stdout);
-#endif
-            current_goal=read_goal_line();
+            current_goal = agent::cli::ReadlineHelper::read_line("You: ");
             if(current_goal.empty())continue;
         }
         // trim trailing whitespace
@@ -544,7 +608,7 @@ int main(int argc, char* argv[]) {
         // Config hot-reload check
         if (g_reload_config.exchange(false)) {
             try {
-                std::ifstream rcf(config_path);
+                agent::utf8_ifstream rcf(config_path);
                 if (rcf.is_open()) {
                     std::string rjcontent((std::istreambuf_iterator<char>(rcf)),
                                            std::istreambuf_iterator<char>());
@@ -583,7 +647,7 @@ int main(int argc, char* argv[]) {
                         if (name.substr(0,5) == "conv-") {
                             // Try to read first line of CONVERSATION.md for summary
                             std::string md_path = e.path().string() + "/CONVERSATION.md";
-                            std::ifstream mdf(md_path);
+                            agent::utf8_ifstream mdf(md_path);
                             std::string first_line;
                             if (mdf.is_open()) {
                                 std::getline(mdf, first_line);
@@ -594,7 +658,9 @@ int main(int argc, char* argv[]) {
                         }
                     }
                 }
-            } catch(...) {}
+            } catch(const std::exception& e) {
+                LOG_WARN("Main","main","convs","Failed to list conversations: " + std::string(e.what()));
+            }
             if (convs.empty()) {
                 print_utf8("No past conversations found.\n");
             } else {
@@ -640,25 +706,29 @@ int main(int argc, char* argv[]) {
         if (current_goal == "/workspace") {
             std::string _wmd = cfg.workspace_dir + "/current/WORKSPACE.md";
             try {
-                std::ifstream _wf(_wmd);
+                agent::utf8_ifstream _wf(_wmd);
                 std::string _wc((std::istreambuf_iterator<char>(_wf)),
                                  std::istreambuf_iterator<char>());
                 print_utf8(_wc.empty() ? "[WORKSPACE.md empty]\n" : _wc+"\n");
-            } catch(...) { print_utf8("[WORKSPACE.md not found]\n"); }
+            } catch(const std::exception& e) {
+                print_utf8("[WORKSPACE.md not found: " + std::string(e.what()) + "]\n");
+            }
             continue;
         }
         if (current_goal == "/experience" || current_goal == "/exp") {
             std::string _emd = cfg.workspace_dir + "/current/memory/EXPERIENCE.md";
             try {
-                std::ifstream _ef(_emd);
+                agent::utf8_ifstream _ef(_emd);
                 std::string _ec((std::istreambuf_iterator<char>(_ef)),
                                  std::istreambuf_iterator<char>());
                 print_utf8(_ec.empty() ? "[No experience yet]\n" : _ec+"\n");
-            } catch(...) { print_utf8("[EXPERIENCE.md not found]\n"); }
+            } catch(const std::exception& e) {
+                print_utf8("[EXPERIENCE.md not found: " + std::string(e.what()) + "]\n");
+            }
             continue;
         }
-        if (current_goal == "/help" || current_goal == "/?") {
-            print_utf8(agent::cli::kHelpText);
+        // ── Command system (handles all / commands) ────
+        if (!current_goal.empty() && current_goal[0] == '/' && cmd_system.execute(current_goal)) {
             continue;
         }
         // ── End conversation commands ────────────────────────────────────────
@@ -701,9 +771,9 @@ int main(int argc, char* argv[]) {
             }
             // Init WORKSPACE.md on first use
             if (!wp.workspace_md.empty()) {
-                std::ifstream _wchk(wp.workspace_md);
+                agent::utf8_ifstream _wchk(wp.workspace_md);
                 if (!_wchk.is_open()) {
-                    std::ofstream _wf(wp.workspace_md);
+                agent::utf8_ofstream _wf(wp.workspace_md);
                     if (_wf.is_open()) {
                         _wf << "# Workspace\n\n"
                             << "| Path | Purpose |\n|------|---------|\n"
@@ -735,8 +805,7 @@ int main(int argc, char* argv[]) {
         auto pause_flag =std::make_shared<std::atomic<bool>>(false);
 
         // Worker contexts (own per-worker memory; share bus and flags)
-        std::vector<std::unique_ptr<agent::WorkerAgent>> worker_storage;
-        std::vector<agent::WorkerAgent*> worker_ptrs;
+        std::vector<std::shared_ptr<agent::WorkerAgent>> worker_ptrs;
         for(int i=0;i<cfg.worker_threads;++i){
             std::string wid="wkr-"+std::to_string(i+1);
             auto worker_mem=std::make_shared<agent::MemoryStore>(cfg.memory_short_term_window);
@@ -752,11 +821,10 @@ int main(int argc, char* argv[]) {
             }
             wctx.skills     =skills;       // shared skill registry
             wctx.session_mem=session_memory;  // cross-run experience
-            auto w=std::make_unique<agent::WorkerAgent>(
+            auto w=std::make_shared<agent::WorkerAgent>(
                 wid,worker_client,registry,wkr_system_full,
                 cfg.max_atomic_retries,std::move(wctx));
-            worker_ptrs.push_back(w.get());
-            worker_storage.push_back(std::move(w));
+            worker_ptrs.push_back(w);
         }
 
         // Manager factory  --  each Manager gets a fresh context + shared run_memory
@@ -799,7 +867,7 @@ int main(int argc, char* argv[]) {
 
         agent::DirectorAgent director(
             "dir-001",director_client,pool,mgr_factory,
-            dir_decompose,dir_review,dir_synth,
+            dir_decompose,dir_review,dir_synth,dir_classify,
             cfg.max_subtask_retries,std::move(dctx));
 
         // Advisor + Supervisor  --  configured from AgentConfig
@@ -817,14 +885,16 @@ int main(int argc, char* argv[]) {
             bus,sup_cfg,cfg.supervisor_max_retries,std::move(advisor));
 
         // Register all Agent state machines with Supervisor for active monitoring
-        for(auto& w : worker_storage) {
+        for(const auto& w : worker_ptrs) {
             // Workers share cancel/pause flags; register each individually
             // so Supervisor can cancel a specific worker
             // (state machine access requires ctx  --  stored inside WorkerAgent)
             // Future: expose ctx.state via WorkerAgent::state() accessor
             // For now, register the shared flags so Supervisor can cancel all workers
-            supervisor.register_context(
-                w->id(), w->state(), cancel_flag, pause_flag);
+            if (w && w->state()) {
+                supervisor.register_context(
+                    w->id(), w->state(), cancel_flag, pause_flag);
+            }
         }
         // Register Director context (full state + flags)
         // Director's state machine was moved into ctx  --  expose via accessor in future
@@ -1003,7 +1073,10 @@ int main(int argc, char* argv[]) {
                 std::string lt_dir=agent::WorkspaceManager::join(wp.memory_dir,"long_term");
                 auto llm_fn=[&](const std::string& prompt)->std::string{
                     try{ return supervisor_client.complete("You are a concise summarizer.",prompt,"summary"); }
-                    catch(...){ return ""; }
+                    catch(const std::exception& e){
+                        LOG_WARN("Main","main",run_id,"Summary generation failed: " + std::string(e.what()));
+                        return "";
+                    }
                 };
                 std::string summary=session_memory->generate_and_store_summary(
                     current_goal, result.answer, lt_dir, llm_fn);
@@ -1029,7 +1102,7 @@ int main(int argc, char* argv[]) {
                 // Save env_knowledge as .md
                 if(use_workspace && env_kb) {
                     std::string ekb_path = cfg.workspace_dir + "/current/env_knowledge.md";
-                    std::ofstream ekf(ekb_path);
+                    agent::utf8_ofstream ekf(ekb_path);
                     if (ekf.is_open()) ekf << env_kb->serialize();
                 }
             }
@@ -1038,9 +1111,11 @@ int main(int argc, char* argv[]) {
             if(use_workspace){
                 try {
                     nlohmann::json jr; to_json(jr,result);
-                    std::ofstream f(wp.result_json);
+                    agent::utf8_ofstream f(wp.result_json);
                     if(f.is_open())f<<jr.dump(2)<<"\n";
-                } catch(...){}
+                } catch(const std::exception& e){
+                    LOG_WARN("Main","main",run_id,"Failed to save result: " + std::string(e.what()));
+                }
             }
 
             // Cleanup artifacts if requested

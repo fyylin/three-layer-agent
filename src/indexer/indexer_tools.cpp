@@ -1,4 +1,5 @@
 #include "indexer/indexer_tools.hpp"
+#include "utils/utf8_fstream.hpp"
 #include "indexer/simple_indexer.hpp"
 #include "utils/tool_set.hpp"
 #include <sstream>
@@ -71,7 +72,7 @@ std::string tool_explain_code(const std::string& input) {
     int start = std::stoi(input.substr(nl1 + 1, nl2 - nl1 - 1));
     int end = std::stoi(input.substr(nl2 + 1));
 
-    std::ifstream f(file);
+    agent::utf8_ifstream f(file);
     if (!f) return "Error: cannot open file";
 
     std::ostringstream out;

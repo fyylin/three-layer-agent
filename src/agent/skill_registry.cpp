@@ -1,4 +1,5 @@
 // =============================================================================
+#include "utils/utf8_fstream.hpp"
 // src/agent/skill_registry.cpp
 // =============================================================================
 #include "agent/skill_registry.hpp"
@@ -25,6 +26,26 @@ namespace {
 static auto   mo_() { return nlohmann::json::object(); }
 static void   js_(nlohmann::json& j,const char* k,const std::string& v){j[k]=nlohmann::json(v);}
 static void   ji_(nlohmann::json& j,const char* k,int v){j[k]=nlohmann::json::from_int((int64_t)v);}
+
+#ifdef _WIN32
+static std::string wchar_to_utf8(const wchar_t* wstr) {
+    if (!wstr) return "";
+    int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return "";
+    std::string result(len - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, &result[0], len, nullptr, nullptr);
+    return result;
+}
+
+static std::wstring utf8_to_wchar(const std::string& str) {
+    if (str.empty()) return L"";
+    int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
+    if (len <= 0) return L"";
+    std::wstring result(len - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &result[0], len);
+    return result;
+}
+#endif
 } // anon
 
 
@@ -228,7 +249,7 @@ void SkillRegistry::load_from_dir(const std::string& dir) {
     // Helper: parse one skill JSON file
     auto parse_skill_file = [&](const std::string& path) {
         try {
-            std::ifstream f(path);
+            agent::utf8_ifstream f(path);
             if (!f.is_open()) return;
             std::string content((std::istreambuf_iterator<char>(f)),
                                  std::istreambuf_iterator<char>());
@@ -258,15 +279,15 @@ void SkillRegistry::load_from_dir(const std::string& dir) {
 
 #if defined(_WIN32)
     // Windows: use FindFirstFile / FindNextFile
-    std::string pattern = dir + "\\*.json";
-    WIN32_FIND_DATAA fd;
-    HANDLE hFind = FindFirstFileA(pattern.c_str(), &fd);
+    std::wstring pattern = utf8_to_wchar(dir + "\\*.json");
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
     if (hFind == INVALID_HANDLE_VALUE) return;
     do {
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            parse_skill_file(dir + "\\" + fd.cFileName);
+            parse_skill_file(dir + "\\" + wchar_to_utf8(fd.cFileName));
         }
-    } while (FindNextFileA(hFind, &fd));
+    } while (FindNextFileW(hFind, &fd));
     FindClose(hFind);
 #else
     // POSIX: use opendir/readdir
@@ -311,7 +332,7 @@ void SkillRegistry::save_to_dir(const std::string& dir) const {
         js_(j,"run_id",        skill.run_id);
         j["parameters"]    = params_arr;
         j["steps"]         = steps_arr;
-        std::ofstream f(dir + "/" + name + ".json");
+        agent::utf8_ofstream f(dir + "/" + name + ".json");
         if (f.is_open()) f << j.dump(2) << "\n";
     }
 }

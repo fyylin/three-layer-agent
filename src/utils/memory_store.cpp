@@ -2,9 +2,9 @@
 // src/utils/memory_store.cpp
 // =============================================================================
 #include "utils/memory_store.hpp"
+#include "utils/utf8_fstream.hpp"
 #include <mutex>
 #include <nlohmann/json.hpp>
-#include <fstream>
 #include <sstream>
 #include <algorithm>
 
@@ -132,12 +132,12 @@ void MemoryStore::save_session(const std::string& path) const {
     std::lock_guard<std::mutex> lk(mu_);
     nlohmann::json j = nlohmann::json::object();
     for (auto& [k, v] : session_) j[k] = v;
-    std::ofstream f(path);
+    utf8_ofstream f(path);
     if (f.is_open()) f << j.dump(2) << "\n";
 }
 
 void MemoryStore::load_session(const std::string& path) {
-    std::ifstream f(path);
+    utf8_ifstream f(path);
     if (!f.is_open()) return;
     std::ostringstream ss; ss << f.rdbuf();
     try {
@@ -153,7 +153,7 @@ void MemoryStore::save_long_term(const std::string& dir) const {
     for (size_t i = 0; i < long_term_.size(); ++i) {
         // Save as .md (also write legacy .txt for backward compat during transition)
         std::string md_path  = dir + "/summary_" + std::to_string(i) + ".md";
-        std::ofstream f(md_path);
+        utf8_ofstream f(md_path);
         if (f.is_open()) {
             f << "# Memory Summary " << i << "\n\n" << long_term_[i] << "\n";
         }
@@ -165,7 +165,7 @@ void MemoryStore::load_long_term(const std::string& dir) {
     for (int i = 0; ; ++i) {
         std::string md_path  = dir + "/summary_" + std::to_string(i) + ".md";
         std::string txt_path = dir + "/summary_" + std::to_string(i) + ".txt";
-        std::ifstream f(md_path);
+        utf8_ifstream f(md_path);
         if (!f.is_open()) f.open(txt_path);   // legacy fallback
         if (!f.is_open()) break;
         std::ostringstream ss; ss << f.rdbuf();
@@ -219,7 +219,7 @@ void MemoryStore::maybe_compact(float threshold) {
 
 void MemoryStore::save_conversation_md(const std::string& md_path) const {
     std::lock_guard<std::mutex> lk(mu_);
-    std::ofstream f(md_path);
+    utf8_ofstream f(md_path);
     if (!f.is_open()) return;
     f << "# Conversation Memory\n\n"
       << "> Auto-maintained by the agent system. You can read and edit this.\n\n";
@@ -237,7 +237,7 @@ void MemoryStore::save_conversation_md(const std::string& md_path) const {
 
 void MemoryStore::load_conversation_md(const std::string& md_path) {
     // Load long-term summaries from MEMORY.md bullet points
-    std::ifstream f(md_path);
+    utf8_ifstream f(md_path);
     if (!f.is_open()) return;
     std::lock_guard<std::mutex> lk(mu_);
     bool in_lt = false;
@@ -254,7 +254,7 @@ void MemoryStore::append_run_to_memory_md(const std::string& md_path,
                                            const std::string& run_id,
                                            const std::string& goal,
                                            const std::string& result_summary) const {
-    std::ofstream f(md_path, std::ios::app);
+    utf8_ofstream f(md_path, std::ios::app);
     if (!f.is_open()) return;
     f << "\n## Run " << run_id << "\n"
       << "**Goal:** " << goal.substr(0, 100) << "\n"

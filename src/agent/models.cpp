@@ -1,4 +1,5 @@
 #include "agent/models.hpp"
+#include "utils/utf8_fstream.hpp"
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -180,6 +181,7 @@ void to_json(nlohmann::json& j, const AgentConfig& c){
     {nlohmann::json dm;to_json(dm,c.director_model);j["director_model"]=dm;}
     {nlohmann::json mm;to_json(mm,c.manager_model); j["manager_model"]=mm;}
     {nlohmann::json wm;to_json(wm,c.worker_model);  j["worker_model"]=wm;}
+    {nlohmann::json sm;to_json(sm,c.supervisor_model); j["supervisor_model"]=sm;}
     si(j,"max_tokens",c.max_tokens);
     sd(j,"temperature",c.temperature);
     sd(j,"top_p",c.top_p);
@@ -191,6 +193,7 @@ void to_json(nlohmann::json& j, const AgentConfig& c){
     si(j,"worker_threads",c.worker_threads);
     ss(j,"log_level",c.log_level);
     ss(j,"prompt_dir",c.prompt_dir);
+    j["use_md_prompts"]=nlohmann::json::from_bool(c.use_md_prompts);
     ss(j,"workspace_dir",c.workspace_dir);
     si(j,"memory_short_term_window",c.memory_short_term_window);
     j["memory_session_enabled"]=nlohmann::json::from_bool(c.memory_session_enabled);
@@ -200,7 +203,7 @@ void to_json(nlohmann::json& j, const AgentConfig& c){
     si(j,"supervisor_max_fail_count",  c.supervisor_max_fail_count);
     j["supervisor_advisor_enabled"]=nlohmann::json::from_bool(c.supervisor_advisor_enabled);
     si(j,"supervisor_max_retries",     c.supervisor_max_retries);
-    if(c.max_cost_per_run_usd>0)  ss(j,"max_cost_per_run_usd",std::to_string(c.max_cost_per_run_usd));
+    sd(j,"max_cost_per_run_usd",c.max_cost_per_run_usd);
     if(c.max_tokens_per_run>0)    si(j,"max_tokens_per_run",(int64_t)c.max_tokens_per_run);
 }
 
@@ -217,6 +220,7 @@ void from_json(const nlohmann::json& j, AgentConfig& c){
     if(j.contains("director_model")) from_json(j.at("director_model"),c.director_model);
     if(j.contains("manager_model"))  from_json(j.at("manager_model"), c.manager_model);
     if(j.contains("worker_model"))   from_json(j.at("worker_model"),  c.worker_model);
+    if(j.contains("supervisor_model")) from_json(j.at("supervisor_model"), c.supervisor_model);
     if(j.contains("max_tokens"))          j.at("max_tokens").get_to(c.max_tokens);
     if(j.contains("temperature"))         j.at("temperature").get_to(c.temperature);
     if(j.contains("top_p"))               j.at("top_p").get_to(c.top_p);
@@ -228,6 +232,7 @@ void from_json(const nlohmann::json& j, AgentConfig& c){
     if(j.contains("worker_threads"))      j.at("worker_threads").get_to(c.worker_threads);
     if(j.contains("log_level"))           j.at("log_level").get_to(c.log_level);
     if(j.contains("prompt_dir"))          j.at("prompt_dir").get_to(c.prompt_dir);
+    if(j.contains("use_md_prompts"))      j.at("use_md_prompts").get_to(c.use_md_prompts);
     if(j.contains("workspace_dir"))       j.at("workspace_dir").get_to(c.workspace_dir);
     if(j.contains("memory_short_term_window")) j.at("memory_short_term_window").get_to(c.memory_short_term_window);
     if(j.contains("memory_session_enabled"))   j.at("memory_session_enabled").get_to(c.memory_session_enabled);
@@ -242,7 +247,7 @@ void from_json(const nlohmann::json& j, AgentConfig& c){
 }
 
 AgentConfig AgentConfig::load(const std::string& path){
-    std::ifstream f(path);
+    agent::utf8_ifstream f(path);
     if(!f.is_open()) throw std::runtime_error("AgentConfig: cannot open: "+path);
     std::ostringstream ss; ss<<f.rdbuf();
     auto j=nlohmann::json::parse(ss.str());
@@ -251,7 +256,7 @@ AgentConfig AgentConfig::load(const std::string& path){
 
 void AgentConfig::save(const std::string& path) const {
     nlohmann::json j; to_json(j, *this);
-    std::ofstream f(path);
+    agent::utf8_ofstream f(path);
     if(!f.is_open()) throw std::runtime_error("AgentConfig::save: cannot open: "+path);
     f << j.dump(2) << "\n";
 }

@@ -10,9 +10,8 @@ SymbolInfo SimpleIndexer::find_definition(const std::string& symbol,
     info.name = symbol;
 
     // Search for function/class definitions
-    // Pattern: "type symbol(" or "class symbol" or "struct symbol"
-    std::string cmd = "cd \"" + root_dir + "\" && grep -rn --include=\"*.cpp\" --include=\"*.hpp\" --include=\"*.h\" "
-                      "-E \"(class|struct|enum|void|int|bool|auto|std::)\\s+" + symbol + "\\s*[\\(\\{]\" . 2>/dev/null || true";
+    std::string cmd = "grep -rn --include=\"*.cpp\" --include=\"*.hpp\" --include=\"*.h\" "
+                      "-E \"(class|struct|enum|void|int|bool|auto|std::)\\s+" + symbol + "\\s*[\\(\\{]\" \"" + root_dir + "\"";
 
     std::string output = runner_(cmd);
     auto locations = parse_grep_output(output);
@@ -28,8 +27,8 @@ SymbolInfo SimpleIndexer::find_definition(const std::string& symbol,
 std::vector<SymbolLocation> SimpleIndexer::find_references(const std::string& symbol,
                                                            const std::string& root_dir) {
     // Find all occurrences of symbol
-    std::string cmd = "cd \"" + root_dir + "\" && grep -rn --include=\"*.cpp\" --include=\"*.hpp\" --include=\"*.h\" "
-                      "\"" + symbol + "\" . 2>/dev/null || true";
+    std::string cmd = "grep -rn --include=\"*.cpp\" --include=\"*.hpp\" --include=\"*.h\" "
+                      "\"" + symbol + "\" \"" + root_dir + "\"";
 
     std::string output = runner_(cmd);
     return parse_grep_output(output);

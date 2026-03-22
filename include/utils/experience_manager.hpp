@@ -24,6 +24,17 @@ namespace agent {
 
 namespace fs = std::filesystem;
 
+enum class FailureCategory {
+    None,
+    SyntaxError,      // Compilation/parsing errors
+    LogicError,       // Runtime logic errors
+    EnvError,         // Environment/dependency issues
+    Timeout,          // Operation timeout
+    PermissionDenied, // Access denied
+    NotFound,         // File/resource not found
+    Unknown
+};
+
 struct ExperienceEntry {
     std::string timestamp;
     std::string tool;
@@ -31,6 +42,7 @@ struct ExperienceEntry {
     std::string outcome;         // "success" | "failure"
     std::string lesson;          // what worked / what failed
     std::string conv_id;
+    FailureCategory failure_category = FailureCategory::None;
 };
 
 struct ExperiencePattern {
@@ -39,6 +51,7 @@ struct ExperiencePattern {
     int successes = 0;
     int failures  = 0;
     std::string best_lesson;
+    std::map<FailureCategory, int> failure_breakdown;
     [[nodiscard]] double success_rate() const noexcept {
         int total = successes + failures;
         return total > 0 ? (double)successes / total : 0.5;
@@ -46,6 +59,18 @@ struct ExperiencePattern {
     [[nodiscard]] bool promotion_eligible() const noexcept {
         // Strict: ≥3 distinct conversations, ≥90% success rate
         return (int)conv_ids.size() >= 3 && success_rate() >= 0.9 && successes >= 3;
+    }
+};
+
+struct DecompositionStrategy {
+    std::string task_type;
+    int num_subtasks = 0;
+    bool parallel = false;
+    double avg_completion_time_ms = 0.0;
+    int success_count = 0;
+    int total_count = 0;
+    [[nodiscard]] double success_rate() const {
+        return total_count > 0 ? (double)success_count / total_count : 0.0;
     }
 };
 
@@ -69,7 +94,8 @@ public:
     void record(const std::string& tool,
                 const std::string& input,
                 const std::string& outcome,
-                const std::string& lesson) {
+                const std::string& lesson,
+                FailureCategory category = FailureCategory::None) {
         ExperienceEntry e;
         e.timestamp     = iso_now();
         e.tool          = tool;
@@ -77,9 +103,23 @@ public:
         e.outcome       = outcome;
         e.lesson        = lesson;
         e.conv_id       = conv_id_;
+        e.failure_category = category;
         append_to_conv(e);
         update_global(e);
         maybe_promote(e);
+    }
+
+    static const char* category_name(FailureCategory cat) {
+        switch(cat) {
+            case FailureCategory::SyntaxError: return "syntax_error";
+            case FailureCategory::LogicError: return "logic_error";
+            case FailureCategory::EnvError: return "env_error";
+            case FailureCategory::Timeout: return "timeout";
+            case FailureCategory::PermissionDenied: return "permission_denied";
+            case FailureCategory::NotFound: return "not_found";
+            case FailureCategory::Unknown: return "unknown";
+            default: return "none";
+        }
     }
 
     // Load cross-conversation experience summary for prompt injection
@@ -100,6 +140,68 @@ public:
         return promoted_;
     }
 
+    // Generate failure mode report
+    [[nodiscard]] std::string generate_failure_report() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        std::ostringstream oss;
+        oss << "# Failure Mode Analysis\n\n";
+
+        std::map<FailureCategory, int> global_breakdown;
+        for (auto& [k, p] : patterns_) {
+            for (auto& [cat, cnt] : p.failure_breakdown)
+                global_breakdown[cat] += cnt;
+        }
+
+        if (!global_breakdown.empty()) {
+            oss << "## Global Failure Distribution\n";
+            for (auto& [cat, cnt] : global_breakdown)
+                oss << "- " << category_name(cat) << ": " << cnt << "\n";
+            oss << "\n";
+        }
+
+        oss << "## Top Failing Patterns\n";
+        std::vector<std::pair<std::string, const ExperiencePattern*>> sorted;
+        for (auto& [k, p] : patterns_)
+            if (p.failures > 0) sorted.push_back({k, &p});
+        std::sort(sorted.begin(), sorted.end(),
+            [](auto& a, auto& b) { return a.second->failures > b.second->failures; });
+
+        for (size_t i = 0; i < std::min(size_t(10), sorted.size()); ++i) {
+            auto& [k, p] = sorted[i];
+            oss << "- " << k.substr(0, 60) << ": " << p->failures << " failures\n";
+        }
+
+        return oss.str();
+    }
+
+    void record_decomposition(const std::string& task_type, int num_subtasks,
+                             bool parallel, double completion_time_ms, bool success) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto& strat = decomp_strategies_[task_type];
+        strat.task_type = task_type;
+        strat.num_subtasks = num_subtasks;
+        strat.parallel = parallel;
+        strat.total_count++;
+        if (success) strat.success_count++;
+        strat.avg_completion_time_ms =
+            (strat.avg_completion_time_ms * (strat.total_count - 1) + completion_time_ms) / strat.total_count;
+    }
+
+    [[nodiscard]] std::string get_decomposition_advice(const std::string& task_type) const {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = decomp_strategies_.find(task_type);
+        if (it == decomp_strategies_.end() || it->second.total_count < 2)
+            return "";
+        auto& s = it->second;
+        std::ostringstream oss;
+        oss << "Based on " << s.total_count << " previous attempts:\n"
+            << "- Success rate: " << (s.success_rate() * 100) << "%\n"
+            << "- Avg subtasks: " << s.num_subtasks << "\n"
+            << "- Parallel: " << (s.parallel ? "yes" : "no") << "\n"
+            << "- Avg time: " << s.avg_completion_time_ms << "ms";
+        return oss.str();
+    }
+
 private:
     std::string conv_exp_;
     std::string global_exp_;
@@ -107,6 +209,7 @@ private:
     std::string conv_id_;
     mutable std::mutex mu_;
     std::map<std::string, ExperiencePattern> patterns_;
+    std::map<std::string, DecompositionStrategy> decomp_strategies_;
     std::vector<std::string> promoted_;
 
     static std::string iso_now() {
@@ -186,8 +289,10 @@ private:
         if (!f.is_open()) return;
         f << "\n## " << e.timestamp << " — " << e.tool << "\n"
           << "- **Outcome:** " << e.outcome << "\n"
-          << "- **Input:** `" << e.input_pattern << "`\n"
-          << "- **Lesson:** " << e.lesson << "\n";
+          << "- **Input:** `" << e.input_pattern << "`\n";
+        if (e.failure_category != FailureCategory::None)
+            f << "- **Category:** " << category_name(e.failure_category) << "\n";
+        f << "- **Lesson:** " << e.lesson << "\n";
     }
 
     // Update global EXPERIENCE.md (cross-conversation)
@@ -201,7 +306,11 @@ private:
                 == pat.conv_ids.end())
             pat.conv_ids.push_back(e.conv_id);
         if (e.outcome == "success") { ++pat.successes; pat.best_lesson = e.lesson; }
-        else                          ++pat.failures;
+        else {
+            ++pat.failures;
+            if (e.failure_category != FailureCategory::None)
+                ++pat.failure_breakdown[e.failure_category];
+        }
 
         // Rewrite EXPERIENCE.md with current patterns
         std::ofstream f(global_exp_);
@@ -209,14 +318,24 @@ private:
         f << "# Cross-Conversation Experience\n\n"
           << "> Auto-generated. Agents use this to avoid repeating mistakes.\n\n";
         for (auto& [k, p] : patterns_) {
-            if (p.successes + p.failures < 2) continue;  // skip single occurrences
+            if (p.successes + p.failures < 2) continue;
             std::string pk_tool = k.substr(0, k.find('|'));
             f << "## " << pk_tool << " — " << k.substr(pk_tool.size()+1,20) << "\n"
               << "- Success rate: " << (int)(p.success_rate()*100) << "%"
-              << " (" << pat.successes << "/" << (pat.successes+pat.failures) << ")\n"
-              << "- Seen in " << pat.conv_ids.size() << " conversation(s)\n"
-              << "- Lesson: " << pat.best_lesson << "\n"
-              << (pat.promotion_eligible() ? "- **[PROMOTED TO SKILL]**\n" : "") << "\n";
+              << " (" << p.successes << "/" << (p.successes+p.failures) << ")\n"
+              << "- Seen in " << p.conv_ids.size() << " conversation(s)\n";
+            if (!p.failure_breakdown.empty()) {
+                f << "- Failure breakdown: ";
+                bool first = true;
+                for (auto& [cat, cnt] : p.failure_breakdown) {
+                    if (!first) f << ", ";
+                    f << category_name(cat) << "(" << cnt << ")";
+                    first = false;
+                }
+                f << "\n";
+            }
+            f << "- Lesson: " << p.best_lesson << "\n"
+              << (p.promotion_eligible() ? "- **[PROMOTED TO SKILL]**\n" : "") << "\n";
         }
     }
 

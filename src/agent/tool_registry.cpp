@@ -1,13 +1,28 @@
-// =============================================================================
+﻿// =============================================================================
 // src/agent/tool_registry.cpp
 // =============================================================================
 #include "agent/tool_registry.hpp"
+#include "agent/tool_cache.hpp"
 #include "utils/logger.hpp"
 
 #include <algorithm>
 #include <stdexcept>
+#include <set>
+#include <sys/stat.h>
 
 namespace agent {
+
+namespace {
+const std::set<std::string> IDEMPOTENT_TOOLS = {
+    "read_file", "list_dir", "stat_file", "find_files",
+    "get_current_dir", "get_sysinfo", "get_env"
+};
+
+std::time_t get_mtime(const std::string& path) {
+    struct stat st;
+    return (stat(path.c_str(), &st) == 0) ? st.st_mtime : 0;
+}
+}
 
 void ToolRegistry::register_tool(const std::string& name, ToolFn fn) {
     std::unique_lock<std::shared_mutex> lk(mu_);
@@ -23,6 +38,14 @@ bool ToolRegistry::has_tool(const std::string& name) const noexcept {
 std::string ToolRegistry::invoke(const std::string& name,
                                   const std::string& input,
                                   const std::string& task_id) const {
+    if (IDEMPOTENT_TOOLS.count(name)) {
+        CacheKey key{name, input, get_mtime(input)};
+        if (auto cached = cache_.get(key)) {
+            LOG_DEBUG("ToolRegistry", "cache", task_id, "cache hit: " + name);
+            return *cached;
+        }
+    }
+
     ToolFn fn;
     {
         std::shared_lock<std::shared_mutex> lk(mu_);
@@ -33,7 +56,12 @@ std::string ToolRegistry::invoke(const std::string& name,
     }
     LOG_DEBUG("ToolRegistry", "registry", task_id, "invoking tool: " + name);
     try {
-        return fn(input);
+        auto result = fn(input);
+        if (IDEMPOTENT_TOOLS.count(name)) {
+            CacheKey key{name, input, get_mtime(input)};
+            cache_.put(key, result);
+        }
+        return result;
     } catch (const std::exception& e) {
         throw ToolException(name, e.what(), task_id, "ToolRegistry");
     } catch (...) {
@@ -51,3 +79,4 @@ std::vector<std::string> ToolRegistry::tool_names() const {
 }
 
 } // namespace agent
+

@@ -9,8 +9,8 @@ cmake-build-*/
 agent_runner
 agent_runner_linux_demo
 
-# Config with secrets
-config/agent_config.json
+# Local config overrides / secrets
+config/*.local.json
 
 # Workspace (runtime state — not source)
 workspace/

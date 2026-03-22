@@ -1,4 +1,5 @@
 // =============================================================================
+#include "utils/utf8_fstream.hpp"
 // src/utils/structured_log.cpp
 // =============================================================================
 #include "utils/structured_log.hpp"
@@ -137,7 +138,7 @@ void StructuredLogger::write_line(const std::string& path,
                                    const std::string& line) noexcept {
     try {
         std::lock_guard<std::mutex> lk(mu);
-        std::ofstream f(path, std::ios::app);
+        agent::utf8_ofstream f(path, std::ios::app);
         if (f.is_open()) { f << line << "\n"; }
     } catch (...) {}
 }

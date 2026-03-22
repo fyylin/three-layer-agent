@@ -21,7 +21,7 @@ static const char* kLayer = "Manager";
 
 ManagerAgent::ManagerAgent(std::string               id,
                            ApiClient&                client,
-                           std::vector<WorkerAgent*> workers,
+                           std::vector<std::shared_ptr<WorkerAgent>> workers,
                            ThreadPool&               pool,
                            std::string               decompose_prompt,
                            std::string               validate_prompt,
@@ -86,10 +86,21 @@ SubTaskReport ManagerAgent::process(const SubTask& task) noexcept {
         // -- Step 1: Decompose ---------------------------------------------
         std::vector<AtomicTask> atomic_tasks;
         {
-            // Check session memory for cached results first
+            // Check result cache first (semantic matching)
+            if (ctx_.result_cache) {
+                std::string cached_summary;
+                std::string cache_key = "subtask:" + task.id;
+                if (ctx_.result_cache->get(cache_key, cached_summary)) {
+                    LOG_INFO(kLayer, id_, task.id, "cache hit, skipping execution");
+                    report.status = TaskStatus::Done;
+                    report.summary = cached_summary;
+                    return report;
+                }
+            }
+
+            // Check session memory for cached decomposition
             std::string cache_key = "decompose:" + task.id;
             if (ctx_.memory && ctx_.memory->has(cache_key)) {
-                // Use cached decomposition (rare but useful on retry)
                 LOG_DEBUG(kLayer, id_, task.id, "using cached decomposition");
             }
 
@@ -153,6 +164,12 @@ SubTaskReport ManagerAgent::process(const SubTask& task) noexcept {
             }
 
             if (ctx_.state) ctx_.state->transition(AgentState::Done, "", task.id);
+
+            // Cache successful result
+            if (ctx_.result_cache && report.status == TaskStatus::Done) {
+                std::string cache_key = "subtask:" + task.id;
+                ctx_.result_cache->put(cache_key, report.summary);
+            }
         } else {
             // Rejected = validated but content doesn't meet criteria (distinct from Failed)
             report.status = TaskStatus::Rejected;
@@ -215,7 +232,8 @@ std::vector<AtomicTask> ManagerAgent::decompose(const SubTask& task,
                 // Validate tool exists
                 bool known = false;
                 for (auto& t : available_tools_) if (t == tool_name) { known=true; break; }
-                if (known && !tool_name.empty()) {
+                // Disable fast-path for write_file: needs structured path\ncontent format
+                if (known && !tool_name.empty() && tool_name != "write_file") {
                     LOG_INFO(kLayer, id_, task.id,
                         "fast-path: " + tool_name + "(" + input_val.substr(0,40) + ")");
                     AtomicTask at;
@@ -271,6 +289,14 @@ std::vector<AtomicTask> ManagerAgent::decompose(const SubTask& task,
         user_msg << "## Previous attempt feedback (must address)\n"
                  << task.retry_feedback << "\n\n";
     user_msg << "## Available tools\n" << tool_list_str << "\n\n"
+             << "## Tool input format (CRITICAL)\n"
+             << "- write_file: \"file_path\\n<actual file content>\"\n"
+             << "- run_command: \"command with args\"\n"
+             << "- list_dir: \"directory_path\"\n"
+             << "- read_file: \"file_path\"\n"
+             << "- find_files: \"search_dir\\npattern\"\n"
+             << "- For write_file: path on first line, then newline, then FULL file content\n"
+             << "- Keep input concise: paths and commands only, NOT full code in description\n\n"
              << "## Instructions\n"
              << "Break this subtask into atomic steps. "
                 "If the task can be done in ONE step (with or without a tool), use ONE step. "
@@ -283,7 +309,7 @@ std::vector<AtomicTask> ManagerAgent::decompose(const SubTask& task,
              << "    \"parent_id\": \"" << task.id << "\",\n"
              << "    \"description\": \"<what to do>\",\n"
              << "    \"tool\": \"<tool_name or empty string>\",\n"
-             << "    \"input\": \"<tool input or empty string>\"\n"
+             << "    \"input\": \"<tool input following format above>\"\n"
              << "  }\n"
              << "]"
              << format_hint
@@ -292,7 +318,14 @@ std::vector<AtomicTask> ManagerAgent::decompose(const SubTask& task,
 
     ctx_.log_info(task.id, EvType::LlmCall, "decompose LLM call");
     if (ctx_.state) ctx_.state->record_call();
-    std::string llm_out = client_.complete(decompose_prompt_, user_msg.str(), task.id);
+
+    std::string prompt = decompose_prompt_;
+    if (ctx_.prompt_opt) {
+        std::string opt = ctx_.prompt_opt->select_best("manager-decompose");
+        if (!opt.empty()) prompt = opt;
+    }
+
+    std::string llm_out = client_.complete(prompt, user_msg.str(), task.id);
 
     nlohmann::json j = parse_llm_json(llm_out);
     if (!j.is_array())
@@ -315,6 +348,73 @@ std::vector<AtomicTask> ManagerAgent::decompose(const SubTask& task,
     }
     if (tasks.empty())
         throw ParseException("decompose: empty task list", llm_out, task.id, kLayer);
+
+    // Validate each atomic task before returning
+    for (size_t i = 0; i < tasks.size(); ++i) {
+        auto& at = tasks[i];
+
+        // Validation 1: tool must exist in available_tools or be empty
+        if (!at.tool.empty()) {
+            bool found = false;
+            for (auto& t : available_tools_) {
+                if (t == at.tool) { found = true; break; }
+            }
+            if (!found) {
+                LOG_WARN(kLayer, id_, task.id,
+                    "atomic task " + at.id + " has unknown tool: " + at.tool);
+                throw ParseException(
+                    "Unknown tool '" + at.tool + "' in atomic task " + at.id,
+                    llm_out, task.id, kLayer);
+            }
+        }
+
+        // Validation 2: forbid obvious placeholder patterns
+        if (!at.input.empty()) {
+            std::string trimmed = at.input;
+            size_t start = trimmed.find_first_not_of(" \t\n\r");
+            if (start != std::string::npos) trimmed = trimmed.substr(start, 100);
+
+            bool is_placeholder = false;
+            if (trimmed.find("<path>") != std::string::npos ||
+                trimmed.find("<file") != std::string::npos ||
+                trimmed.find("<directory>") != std::string::npos ||
+                trimmed.find("$HOME") == 0 ||
+                trimmed.find("%USERPROFILE%") == 0 ||
+                (trimmed.size() > 0 && trimmed[0] == '~')) {
+                is_placeholder = true;
+            }
+
+            if (is_placeholder) {
+                LOG_WARN(kLayer, id_, task.id,
+                    "atomic task " + at.id + " has placeholder in input: " + at.input.substr(0,60));
+                throw ParseException(
+                    "Placeholder path in atomic task " + at.id + ": " + at.input.substr(0,60),
+                    llm_out, task.id, kLayer);
+            }
+        }
+
+        // Validation 3: if description mentions "Use <tool>", must have tool field
+        if (at.description.find("Use ") == 0 && at.tool.empty()) {
+            LOG_WARN(kLayer, id_, task.id,
+                "atomic task " + at.id + " description mentions tool but tool field is empty");
+            // Try to extract from description
+            size_t tool_start = 4; // after "Use "
+            size_t tool_end = at.description.find_first_of(" \t.(", tool_start);
+            if (tool_end != std::string::npos) {
+                std::string extracted_tool = at.description.substr(tool_start, tool_end - tool_start);
+                // Validate extracted tool exists
+                for (auto& t : available_tools_) {
+                    if (t == extracted_tool) {
+                        at.tool = extracted_tool;
+                        LOG_INFO(kLayer, id_, task.id,
+                            "extracted tool '" + extracted_tool + "' from description");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     return tasks;
 }
 
@@ -348,7 +448,15 @@ std::vector<AtomicResult> ManagerAgent::dispatch(
         futures.reserve(tasks.size());
         for (size_t i = 0; i < tasks.size(); ++i) {
             AtomicTask   tc     = tasks[i];
-            WorkerAgent* worker = select_worker(tc.tool, i);
+            auto worker = select_worker(tc.tool, i);
+            if (!worker) {
+                AtomicResult fail;
+                fail.task_id = tc.id;
+                fail.status = TaskStatus::Failed;
+                fail.error = "No worker available";
+                results.push_back(fail);
+                continue;
+            }
             LOG_DEBUG(kLayer, id_, subtask_id,
                 "parallel dispatch " + tc.id + " -> " + worker->id());
             futures.push_back(pool_.submit(
@@ -412,21 +520,31 @@ std::vector<AtomicResult> ManagerAgent::dispatch(
 
         // Submit this wave in parallel
         std::vector<std::future<AtomicResult>> wave_futures;
+        std::vector<size_t> valid_indices;
         wave_futures.reserve(ready.size());
         for (size_t i : ready) {
             AtomicTask   tc     = tasks[i];
-            WorkerAgent* worker = select_worker(tc.tool, i);
+            auto worker = select_worker(tc.tool, i);
+            if (!worker) {
+                AtomicResult fail;
+                fail.task_id = tc.id;
+                fail.status = TaskStatus::Failed;
+                fail.error = "No worker available";
+                results[i] = fail;
+                continue;
+            }
             LOG_DEBUG(kLayer, id_, subtask_id,
                 "DAG wave dispatch " + tc.id + " -> " + worker->id());
             wave_futures.push_back(pool_.submit(
                 [worker, tc = std::move(tc)]() mutable {
                     return worker->execute(tc);
                 }));
+            valid_indices.push_back(i);
         }
 
         // Collect wave results
-        for (size_t j = 0; j < ready.size(); ++j) {
-            size_t       i   = ready[j];
+        for (size_t j = 0; j < valid_indices.size(); ++j) {
+            size_t       i   = valid_indices[j];
             AtomicResult res = wave_futures[j].get();
             // C1: Store completed result in session_mem for input_from injection
             if (ctx_.session_mem && res.status == TaskStatus::Done
@@ -453,8 +571,9 @@ AtomicResult ManagerAgent::retry_atomic(const AtomicTask& task) noexcept {
             "retry " + std::to_string(attempt) + "/" + std::to_string(max_atomic_retries_));
         std::this_thread::sleep_for(
             std::chrono::milliseconds(250 * (1 << (attempt - 1))));
-        WorkerAgent* worker = select_worker(task.tool, (size_t)attempt);
-        AtomicResult res    = worker->execute(task);
+        auto worker = select_worker(task.tool, (size_t)attempt);
+        if (!worker) continue;
+        AtomicResult res = worker->execute(task);
         if (res.status != TaskStatus::Failed) return res;
     }
     AtomicResult fail;
@@ -472,13 +591,21 @@ std::pair<bool,std::string> ManagerAgent::validate(
 
     // Fast-path shortcut: if all results came from tool fast-path (no LLM),
     // they are raw tool output — valid by definition. Skip LLM validation.
+    // EXCEPTION: creation tasks (write_file, create, generate) need quality check
     bool all_fast_path = !results.empty() &&
         std::all_of(results.begin(), results.end(),
             [](const AtomicResult& r){ return r.fast_path && r.status == TaskStatus::Done; });
-    if (all_fast_path) {
+    bool needs_validation = task.description.find("write") != std::string::npos ||
+                           task.description.find("create") != std::string::npos ||
+                           task.description.find("generate") != std::string::npos;
+    if (all_fast_path && !needs_validation) {
         LOG_INFO(kLayer, id_, task.id,
             "validate fast-pass: all results from tool fast-path, no LLM needed");
         return {true, ""};  // raw tool output is trusted, skip LLM
+    }
+    if (all_fast_path && needs_validation) {
+        LOG_INFO(kLayer, id_, task.id,
+            "creation task detected: performing quality validation despite fast-path");
     }
 
     nlohmann::json results_j = nlohmann::json::array();
@@ -490,15 +617,35 @@ std::pair<bool,std::string> ManagerAgent::validate(
     std::ostringstream user_msg;
     user_msg << "## Subtask\n" << task.description << "\n\n"
              << "## Acceptance criteria\n" << task.expected_output << "\n\n"
-             << "## Execution results\n" << results_j.dump(2) << "\n\n"
-             << "Evaluate. Respond with ONLY:\n"
+             << "## Execution results\n" << results_j.dump(2) << "\n\n";
+
+    // Enhanced validation for creation tasks
+    if (needs_validation) {
+        user_msg << "## Quality Check (STRICT)\n"
+                 << "REJECT (approved=false) if ANY of these issues exist:\n"
+                 << "1. Syntax errors in code (SyntaxError, parse failures)\n"
+                 << "2. File contains format markers (---CONTENT---, ---BEGIN---, etc.)\n"
+                 << "3. Placeholders remain (TODO, FIXME, <placeholder>, ...)\n"
+                 << "4. Missing required components (imports, entry point, etc.)\n"
+                 << "5. Invalid config syntax or broken references\n"
+                 << "If ANY issue found, set approved=false with specific feedback.\n\n";
+    }
+
+    user_msg << "Evaluate. Respond with ONLY:\n"
              << "{\"approved\": true or false, "
              << "\"feedback\": \"<mandatory if false, else empty>\"}";
 
     try {
         ctx_.log_info(task.id, EvType::LlmCall, "validate LLM call");
         if (ctx_.state) ctx_.state->record_call();
-        std::string    llm_out  = client_.complete(validate_prompt_, user_msg.str(), task.id);
+
+        std::string prompt = validate_prompt_;
+        if (ctx_.prompt_opt) {
+            std::string opt = ctx_.prompt_opt->select_best("manager-validate");
+            if (!opt.empty()) prompt = opt;
+        }
+
+        std::string    llm_out  = client_.complete(prompt, user_msg.str(), task.id);
         nlohmann::json j        = parse_llm_json(llm_out);
         bool           approved = j.at("approved").get<bool>();
         std::string    feedback;
@@ -513,15 +660,17 @@ std::pair<bool,std::string> ManagerAgent::validate(
 
 // -- helpers -------------------------------------------------------------------
 
-WorkerAgent* ManagerAgent::select_worker(const std::string& tool,
+std::shared_ptr<WorkerAgent> ManagerAgent::select_worker(const std::string& tool,
                                           size_t hint) const noexcept {
+    if (workers_.empty()) return nullptr;
     if (tool.empty() || workers_.size() == 1)
         return workers_[hint % workers_.size()];
 
     // Pick the Worker with the best historical success rate for this tool
-    WorkerAgent* best    = nullptr;
+    std::shared_ptr<WorkerAgent> best;
     float        best_rt = -1.0f;
-    for (auto* w : workers_) {
+    for (const auto& w : workers_) {
+        if (!w) continue;
         float r = w->tool_success_rate(tool);
         if (r > best_rt) { best_rt = r; best = w; }
     }

@@ -1,7 +1,9 @@
 // =============================================================================
+#include "utils/utf8_fstream.hpp"
 // src/agent/director_agent.cpp   --   v2: AgentContext wired in
 // =============================================================================
 #include "agent/director_agent.hpp"
+#include "agent/global_summary.hpp"
 #include <cstring>
 #include "utils/task_rules.hpp"
 #ifdef _WIN32
@@ -13,7 +15,9 @@
 #include "utils/json_utils.hpp"
 #include <nlohmann/json.hpp>
 #include <atomic>
+#include <cctype>
 #include <future>
+#include <optional>
 #include <unordered_map>
 #include <sstream>
 #include <thread>
@@ -86,6 +90,7 @@ DirectorAgent::DirectorAgent(std::string    id,
                              std::string    decompose_prompt,
                              std::string    review_prompt,
                              std::string    synthesise_prompt,
+                             std::string    classify_prompt,
                              int            max_subtask_retries,
                              AgentContext   ctx)
     : id_(std::move(id))
@@ -96,6 +101,7 @@ DirectorAgent::DirectorAgent(std::string    id,
     , decompose_prompt_(std::move(decompose_prompt))
     , review_prompt_(std::move(review_prompt))
     , synthesise_prompt_(std::move(synthesise_prompt))
+    , classify_prompt_(std::move(classify_prompt))
     , max_subtask_retries_(max_subtask_retries)
     , ctx_(std::move(ctx))
 {
@@ -104,31 +110,265 @@ DirectorAgent::DirectorAgent(std::string    id,
     ctx_.log_info("", EvType::AgentCreated, "Director " + id_ + " created");
 }
 
+namespace {
+
+std::string trim_copy(std::string s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
+std::string extract_current_request(const std::string& desc, size_t max_len = 0) {
+    static const char* REQ_MARKER = "[Current request:]";
+    std::string req = desc;
+    auto mpos = desc.find(REQ_MARKER);
+    if (mpos != std::string::npos) {
+        mpos += std::strlen(REQ_MARKER);
+        while (mpos < desc.size() &&
+               (desc[mpos] == '\n' || desc[mpos] == '\r' || desc[mpos] == ' ')) ++mpos;
+        req = desc.substr(mpos);
+    }
+    if (max_len > 0 && req.size() > max_len) req.resize(max_len);
+    return req;
+}
+
+std::string ascii_upper_copy(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s)
+        out.push_back(static_cast<char>(std::toupper(c)));
+    return out;
+}
+
+bool has_label_token(const std::string& text, const char* label) {
+    size_t pos = text.find(label);
+    while (pos != std::string::npos) {
+        bool left_ok = (pos == 0) || !std::isalnum(static_cast<unsigned char>(text[pos - 1]));
+        size_t end = pos + std::strlen(label);
+        bool right_ok = (end >= text.size()) || !std::isalnum(static_cast<unsigned char>(text[end]));
+        if (left_ok && right_ok) return true;
+        pos = text.find(label, pos + 1);
+    }
+    return false;
+}
+
+bool looks_like_real_path(const std::string& text) {
+    for (size_t i = 0; i + 2 < text.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(text[i]);
+        if (((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) &&
+            text[i + 1] == ':' &&
+            (text[i + 2] == '\\' || text[i + 2] == '/')) {
+            return true;
+        }
+    }
+
+    static const char* kPathHints[] = {
+        "./", "../", "~/", "/tmp/", "/var/", "/home/", "\\\\", nullptr
+    };
+    for (int i = 0; kPathHints[i]; ++i)
+        if (text.find(kPathHints[i]) != std::string::npos) return true;
+    return false;
+}
+
+bool contains_ascii_keyword(const std::string& text, const char* keyword) {
+    return ascii_upper_copy(text).find(ascii_upper_copy(keyword)) != std::string::npos;
+}
+
+bool is_creation_subtask(const std::string& text) {
+    return contains_ascii_keyword(text, "write_file") ||
+           contains_ascii_keyword(text, "create") ||
+           contains_ascii_keyword(text, "write ") ||
+           text.find(u8"创建") != std::string::npos ||
+           text.find(u8"写入") != std::string::npos;
+}
+
+bool is_followup_validation_subtask(const std::string& text) {
+    return contains_ascii_keyword(text, "verify") ||
+           contains_ascii_keyword(text, "validation") ||
+           contains_ascii_keyword(text, "check") ||
+           contains_ascii_keyword(text, "accessible") ||
+           contains_ascii_keyword(text, "exists") ||
+           contains_ascii_keyword(text, "syntax") ||
+           contains_ascii_keyword(text, "stat_file") ||
+           contains_ascii_keyword(text, "list_dir") ||
+           text.find(u8"验证") != std::string::npos ||
+           text.find(u8"检查") != std::string::npos;
+}
+
+bool is_file_creation_request(const std::string& text) {
+    return looks_like_real_path(text) && is_creation_subtask(text);
+}
+
+std::string extract_real_path_snippet(const std::string& text) {
+    for (char quote : std::string{"\"'`"}) {
+        size_t pos = 0;
+        while ((pos = text.find(quote, pos)) != std::string::npos) {
+            size_t end = text.find(quote, pos + 1);
+            if (end == std::string::npos) break;
+            std::string candidate = trim_copy(text.substr(pos + 1, end - pos - 1));
+            if (looks_like_real_path(candidate)) return candidate;
+            pos = end + 1;
+        }
+    }
+
+    for (size_t i = 0; i + 2 < text.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(text[i]);
+        if ((((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) &&
+            text[i + 1] == ':' &&
+            (text[i + 2] == '\\' || text[i + 2] == '/')) {
+            size_t end = i + 3;
+            while (end < text.size()) {
+                char ch = text[end];
+                if (ch == '\r' || ch == '\n' || ch == '"' || ch == '\'' || ch == '`') break;
+                ++end;
+            }
+            std::string candidate = trim_copy(text.substr(i, end - i));
+            while (!candidate.empty()) {
+                char tail = candidate.back();
+                if (tail == '.' || tail == ',' || tail == ';') candidate.pop_back();
+                else break;
+            }
+            if (looks_like_real_path(candidate)) return candidate;
+        }
+    }
+    return "";
+}
+
+void renumber_subtasks(std::vector<SubTask>& tasks) {
+    for (size_t i = 0; i < tasks.size(); ++i)
+        tasks[i].id = "subtask-" + std::to_string(i + 1);
+}
+
+std::vector<SubTask> compact_file_creation_subtasks(
+        const std::string& request,
+        std::vector<SubTask> tasks) {
+    if (!is_file_creation_request(request) || tasks.size() <= 2) return tasks;
+
+    std::optional<SubTask> creation;
+    std::optional<SubTask> validation;
+    std::string request_path = extract_real_path_snippet(request);
+
+    for (const auto& task : tasks) {
+        if (!creation && is_creation_subtask(task.description))
+            creation = task;
+        if (!validation &&
+            is_followup_validation_subtask(task.description) &&
+            looks_like_real_path(task.description)) {
+            validation = task;
+        }
+    }
+
+    if (!creation) return tasks;
+
+    if (!request_path.empty() && !looks_like_real_path(creation->description))
+        creation->description += " Target path: " + request_path;
+
+    std::vector<SubTask> compacted;
+    compacted.push_back(*creation);
+
+    if (validation.has_value()) {
+        compacted.push_back(*validation);
+    } else {
+        std::string verify_path = request_path.empty()
+            ? extract_real_path_snippet(creation->description)
+            : request_path;
+        SubTask verify;
+        verify.description = verify_path.empty()
+            ? "Verify the created file exists at the requested path and perform a basic syntax or startup check if possible."
+            : "Verify the created file exists at " + verify_path +
+              " and perform a basic syntax or startup check if possible.";
+        verify.expected_output = verify_path.empty()
+            ? "Tool evidence confirms the file exists and passes a lightweight validity check, or reports a concrete limitation."
+            : "Tool evidence confirms " + verify_path +
+              " exists and passes a lightweight validity check, or reports a concrete limitation.";
+        compacted.push_back(std::move(verify));
+    }
+
+    renumber_subtasks(compacted);
+    return compacted;
+}
+
+bool should_dispatch_sequentially(const std::vector<SubTask>& tasks) {
+    bool has_creation = false;
+    bool has_validation = false;
+    for (const auto& task : tasks) {
+        if (looks_like_real_path(task.description)) {
+            if (is_creation_subtask(task.description)) has_creation = true;
+            if (is_followup_validation_subtask(task.description)) has_validation = true;
+        }
+    }
+    return has_creation && has_validation;
+}
+
+std::optional<TaskComplexity> parse_complexity_label(const std::string& raw) {
+    std::string candidate = trim_copy(raw);
+    if (candidate.empty()) return std::nullopt;
+
+    try {
+        auto j = nlohmann::json::parse(candidate);
+        if (j.is_string()) {
+            candidate = j.get<std::string>();
+        } else if (j.is_object()) {
+            for (const char* key : {"label", "complexity", "route"}) {
+                if (j.contains(key) && j.at(key).is_string()) {
+                    candidate = j.at(key).get<std::string>();
+                    break;
+                }
+            }
+        }
+    } catch (...) {
+        // Plain-text labels are expected; ignore parse failures.
+    }
+
+    candidate = ascii_upper_copy(trim_copy(candidate));
+    struct LabelMap { const char* label; TaskComplexity value; };
+    static const LabelMap kLabels[] = {
+        {"L0", TaskComplexity::L0_Conversational},
+        {"L1", TaskComplexity::L1_SingleTool},
+        {"L2", TaskComplexity::L2_SingleSubtask},
+        {"L3", TaskComplexity::L3_Parallel},
+        {"L4", TaskComplexity::L4_Complex},
+    };
+    for (const auto& item : kLabels)
+        if (has_label_token(candidate, item.label)) return item.value;
+    return std::nullopt;
+}
+
+const char* complexity_to_cstr(TaskComplexity complexity) {
+    switch (complexity) {
+        case TaskComplexity::L0_Conversational: return "L0";
+        case TaskComplexity::L1_SingleTool:     return "L1";
+        case TaskComplexity::L2_SingleSubtask:  return "L2";
+        case TaskComplexity::L3_Parallel:       return "L3";
+        case TaskComplexity::L4_Complex:        return "L4";
+    }
+    return "L3";
+}
+
+struct ApiClientConfigScope {
+    ApiClient& client;
+    ApiConfig  saved;
+
+    explicit ApiClientConfigScope(ApiClient& c)
+        : client(c), saved(c.config()) {}
+
+    ~ApiClientConfigScope() {
+        client.reconfigure(saved);
+    }
+};
+
+} // namespace
+
 
 // -- assess_complexity --------------------------------------------------------
-// Heuristic complexity assessment (zero LLM calls).
-// Errs on the side of over-simplification: if unsure, route normally.
+// Heuristic fallback. LLM classification is preferred; this remains the safety net.
 
 TaskComplexity DirectorAgent::assess_complexity(
         const std::string& desc) noexcept {
 
     // ── Extract [Current request:] if goal is wrapped with conversation history ──
-    const std::string* src = &desc;
-    std::string req_only;
-    static const char* REQ_MARKER = "[Current request:]";
-    {
-        auto mpos = desc.find(REQ_MARKER);
-        if (mpos != std::string::npos) {
-            mpos += std::strlen(REQ_MARKER);
-            while (mpos < desc.size() &&
-                   (desc[mpos]=='\n'||desc[mpos]=='\r'||desc[mpos]==' ')) ++mpos;
-            req_only = desc.substr(mpos);
-            // Trim to first 200 chars to avoid noise from any appended content
-            if (req_only.size() > 200) req_only.resize(200);
-            src = &req_only;
-        }
-    }
-    const std::string& req = *src;
+    std::string req = extract_current_request(desc, 200);
 
     // Count Unicode code points
     size_t nchars = 0;
@@ -138,6 +378,10 @@ TaskComplexity DirectorAgent::assess_complexity(
     std::string d;
     d.reserve(req.size());
     for (unsigned char c : req) d.push_back((char)std::tolower(c));
+
+    // Any concrete filesystem path is an operational request, not a chat-only turn.
+    if (looks_like_real_path(req))
+        return TaskComplexity::L3_Parallel;
 
     // ══════════════════════════════════════════════════════
     // L0: PURE CONVERSATIONAL — no tools needed at all
@@ -240,15 +484,13 @@ TaskComplexity DirectorAgent::assess_complexity(
 
     // Chinese knowledge questions (must start with 什么是/怎么/为什么/如何)
     // These are pure Q&A with no action intent
+    // CRITICAL: Only match if NO action verbs found above
     static const char* CN_KNOWLEDGE[] = {
         "\xe4\xbb\x80\xe4\xb9\x88\xe6\x98\xaf",              // 什么是
         "\xe6\x80\x8e\xe4\xb9\x88\xe7\x90\x86\xe8\xa7\xa3",  // 怎么理解
         "\xe4\xb8\xba\xe4\xbb\x80\xe4\xb9\x88",              // 为什么
         "\xe8\xa7\xa3\xe9\x87\x8a\xe4\xb8\x80\xe4\xb8\x8b",  // 解释一下
         "\xe4\xbb\x8b\xe7\xbb\x8d\xe4\xb8\x80\xe4\xb8\x8b",  // 介绍一下
-        "\xe4\xbd\xa0\xe8\x83\xbd",                             // 你能
-        "\xe6\x94\xaf\xe6\x8c\x81",                             // 支持
-        "\xe6\x80\x8e\xe4\xb9\x88\xe7\x94\xa8",              // 怎么用
         nullptr
     };
     for (int i = 0; CN_KNOWLEDGE[i]; ++i)
@@ -310,10 +552,61 @@ TaskComplexity DirectorAgent::assess_complexity(
     return TaskComplexity::L3_Parallel;
 }
 
+TaskComplexity DirectorAgent::classify_complexity(
+        const std::string& description) noexcept {
+    TaskComplexity heuristic = assess_complexity(description);
+    if (classify_prompt_.empty())
+        return heuristic;
 
+    std::string request = trim_copy(extract_current_request(description, 400));
+    if (request.empty())
+        return heuristic;
 
+    try {
+        std::string prompt = classify_prompt_;
+        if (ctx_.prompt_opt) {
+            std::string opt = ctx_.prompt_opt->select_best("director-classify");
+            if (!opt.empty()) prompt = opt;
+        }
+        if (prompt.empty())
+            return heuristic;
 
+        ApiClientConfigScope guard(client_);
+        auto cfg = guard.saved;
+        if (cfg.max_tokens <= 0 || cfg.max_tokens > 32) cfg.max_tokens = 32;
+        cfg.temperature = 0.0;
+        cfg.top_p = -1.0;
+        client_.reconfigure(cfg);
 
+        ctx_.log_info("classify", EvType::LlmCall, "complexity classify");
+        if (ctx_.state) ctx_.state->record_call();
+        std::string llm_out = client_.complete(prompt, request, "classify");
+        auto parsed = parse_complexity_label(llm_out);
+        if (!parsed) {
+            LOG_WARN(kLayer, id_, "classify",
+                "unrecognised classification output: " + trim_copy(llm_out));
+            return heuristic;
+        }
+
+        TaskComplexity classified = *parsed;
+        if (classified == TaskComplexity::L0_Conversational &&
+            heuristic != TaskComplexity::L0_Conversational) {
+            LOG_WARN(kLayer, id_, "classify",
+                "classifier suggested L0 but heuristic detected actionable intent; using " +
+                std::string(complexity_to_cstr(heuristic)));
+            return heuristic;
+        }
+
+        LOG_INFO(kLayer, id_, "classify",
+            "llm=" + std::string(complexity_to_cstr(classified)) +
+            ", heuristic=" + std::string(complexity_to_cstr(heuristic)));
+        return classified;
+    } catch (const std::exception& e) {
+        LOG_WARN(kLayer, id_, "classify",
+            std::string("classification failed, falling back to heuristic: ") + e.what());
+        return heuristic;
+    }
+}
 
 // -- decompose_goal ------------------------------------------------------------
 
@@ -323,7 +616,26 @@ FinalResult DirectorAgent::run(const UserGoal& goal) noexcept {
     const std::string run_id = make_run_id();
 
     result.started_at = iso_now();
-    client_.reset_usage();  // fresh usage counter per run
+    client_.reset_usage();
+
+    // Extract context and update global summary
+    if (goal.description.find("桌面") != std::string::npos ||
+        goal.description.find("Desktop") != std::string::npos) {
+        conv_ctx_.add("location", "Desktop");
+        if (ctx_.global_summary) {
+            ctx_.global_summary->set("current_location", "Desktop", 2);
+        }
+    }
+    if (goal.description.find("这个文件") != std::string::npos ||
+        goal.description.find("该文件") != std::string::npos) {
+        std::string last_loc = conv_ctx_.get("location");
+        if (!last_loc.empty()) {
+            conv_ctx_.add("file_context", "file in " + last_loc);
+            if (ctx_.global_summary) {
+                ctx_.global_summary->set("file_context", "referring to file in " + last_loc, 2);
+            }
+        }
+    }
 
     if (ctx_.state)
         ctx_.state->transition(AgentState::Running, "Decomposing", run_id);
@@ -341,7 +653,7 @@ FinalResult DirectorAgent::run(const UserGoal& goal) noexcept {
 
     try {
         // -- Step 0: Complexity assessment  --  route simple tasks directly ----
-        TaskComplexity complexity = assess_complexity(enriched_goal.description);
+        TaskComplexity complexity = classify_complexity(enriched_goal.description);
 
         if (complexity == TaskComplexity::L0_Conversational) {
             // Answer directly without spawning any Manager or Worker
@@ -453,6 +765,16 @@ FinalResult DirectorAgent::run(const UserGoal& goal) noexcept {
             }
         } // end if (tasks.empty()) — LLM decompose
 
+        std::string current_request = extract_current_request(enriched_goal.description);
+        size_t original_task_count = tasks.size();
+        tasks = compact_file_creation_subtasks(current_request, std::move(tasks));
+        if (tasks.size() != original_task_count) {
+            LOG_INFO(kLayer, id_, run_id,
+                "compacted file-creation workflow from " +
+                std::to_string(original_task_count) + " to " +
+                std::to_string(tasks.size()) + " subtasks");
+        }
+
         LOG_INFO(kLayer, id_, run_id,
             "decomposed into " + std::to_string(tasks.size()) + " subtasks");
 
@@ -463,7 +785,7 @@ FinalResult DirectorAgent::run(const UserGoal& goal) noexcept {
             try {
                 nlohmann::json j = nlohmann::json::array();
                 for (auto& t : tasks) { nlohmann::json jt; to_json(jt,t); j.push_back(jt); }
-                std::ofstream f(path);
+                agent::utf8_ofstream f(path);
                 if (f.is_open()) f << j.dump(2) << "\n";
             } catch (...) {}
         }
@@ -511,7 +833,7 @@ FinalResult DirectorAgent::run(const UserGoal& goal) noexcept {
                 for (auto& r : reports) {
                     nlohmann::json jr; to_json(jr, r); ckpt.push_back(jr);
                 }
-                std::ofstream ck_f(ctx_.workspace.run_root + "/checkpoint.json");
+                agent::utf8_ofstream ck_f(ctx_.workspace.run_root + "/checkpoint.json");
                 if (ck_f.is_open()) ck_f << ckpt.dump(2) << "\n";
             } catch (...) {}
         }
@@ -583,7 +905,7 @@ FinalResult DirectorAgent::run(const UserGoal& goal) noexcept {
         if (!ctx_.workspace.result_json.empty()) {
             try {
                 nlohmann::json jr; to_json(jr, result);
-                std::ofstream f(ctx_.workspace.result_json);
+                agent::utf8_ofstream f(ctx_.workspace.result_json);
                 if (f.is_open()) f << jr.dump(2) << "\n";
             } catch (...) {}
         }
@@ -591,7 +913,7 @@ FinalResult DirectorAgent::run(const UserGoal& goal) noexcept {
         // Append session record to WORKSPACE.md
         if (!ctx_.workspace.workspace_md.empty()) {
             try {
-                std::ofstream wmd(ctx_.workspace.workspace_md, std::ios::app);
+                agent::utf8_ofstream wmd(ctx_.workspace.workspace_md, std::ios::app);
                 if (wmd.is_open()) {
                     // ISO timestamp
                     auto now = std::chrono::system_clock::now();
@@ -650,6 +972,36 @@ FinalResult DirectorAgent::run(const UserGoal& goal) noexcept {
 
 std::vector<SubTaskReport> DirectorAgent::dispatch_managers(
         const std::vector<SubTask>& tasks) {
+
+    if (should_dispatch_sequentially(tasks)) {
+        LOG_INFO(kLayer, id_, "dispatch",
+            "detected dependent file workflow; dispatching managers sequentially");
+        std::vector<SubTaskReport> reports;
+        reports.reserve(tasks.size());
+        for (const auto& task : tasks) {
+            std::shared_ptr<IManager> mgr;
+            try {
+                mgr = mgr_pool_.acquire(task);
+            } catch (const std::exception& e) {
+                LOG_ERROR(kLayer, id_, task.id, std::string("pool acquire failed: ") + e.what());
+                SubTaskReport fr;
+                fr.subtask_id = task.id;
+                fr.status     = TaskStatus::Failed;
+                fr.issues     = std::string("ManagerPool::acquire threw: ") + e.what();
+                reports.push_back(std::move(fr));
+                continue;
+            }
+
+            LOG_DEBUG(kLayer, id_, task.id,
+                "dispatching to manager " + mgr->id() + " [pooled][sequential]");
+            auto report = mgr->process(task);
+            mgr_pool_.release(mgr, report.status == TaskStatus::Done);
+            if (ctx_.session_mem && report.status == TaskStatus::Done && !report.summary.empty())
+                ctx_.session_mem->set("shared:" + report.subtask_id, report.summary.substr(0, 400));
+            reports.push_back(std::move(report));
+        }
+        return reports;
+    }
 
     // Use ManagerPool for persistent, memory-retaining Managers
     // Managers are classified by task type and reused across subtasks
@@ -723,7 +1075,14 @@ std::vector<ReviewFeedback> DirectorAgent::review(
 
     ctx_.log_info("review", EvType::LlmCall, "review LLM call");
     if (ctx_.state) ctx_.state->record_call();
-    std::string    llm_out = client_.complete(review_prompt_, user_msg.str(), "review");
+
+    std::string prompt = review_prompt_;
+    if (ctx_.prompt_opt) {
+        std::string opt = ctx_.prompt_opt->select_best("director-review");
+        if (!opt.empty()) prompt = opt;
+    }
+
+    std::string    llm_out = client_.complete(prompt, user_msg.str(), "review");
     nlohmann::json j       = parse_llm_json(llm_out);
 
     if (!j.is_array())
@@ -795,6 +1154,20 @@ std::vector<SubTask> DirectorAgent::decompose_goal(const UserGoal&    goal,
                                                     const std::string& format_hint) const {
     std::ostringstream user_msg;
 
+    // Inject global summary (shared across all agents)
+    if (ctx_.global_summary) {
+        std::string global_ctx = ctx_.global_summary->build_context(5);
+        if (!global_ctx.empty()) {
+            user_msg << global_ctx << "\n\n";
+        }
+    }
+
+    // Inject conversation context
+    std::string conv_summary = conv_ctx_.build_summary(3);
+    if (!conv_summary.empty()) {
+        user_msg << conv_summary << "\n\n";
+    }
+
     // Inject workspace + CWD context (via helper to avoid duplication)
     {
         std::string ws_info = build_ws_context(ctx_.workspace);
@@ -836,6 +1209,11 @@ std::vector<SubTask> DirectorAgent::decompose_goal(const UserGoal&    goal,
              << "Decompose this goal into independent, parallelisable subtasks. "
                 "Each subtask must be self-contained with measurable acceptance criteria. "
                 "Simple requests (greetings, single questions) need only 1 subtask.\n\n"
+             << "IMPORTANT: For creation tasks (write/create/generate files/docs/configs), "
+                "add a verification subtask based on available resources:\n"
+                "- Code: check dependencies exist, test syntax/run if possible\n"
+                "- Docs: verify completeness, check links if applicable\n"
+                "- Configs: validate syntax, check required fields\n\n"
              << "## Required output format\n"
              << "Respond with ONLY a JSON array (no prose, no fences):\n"
              << "[\n"
@@ -850,7 +1228,14 @@ std::vector<SubTask> DirectorAgent::decompose_goal(const UserGoal&    goal,
 
     ctx_.log_info("decompose", EvType::LlmCall, "decompose_goal LLM call");
     if (ctx_.state) ctx_.state->record_call();
-    std::string llm_out = client_.complete(decompose_prompt_, user_msg.str(), "decompose");
+
+    std::string prompt = decompose_prompt_;
+    if (ctx_.prompt_opt) {
+        std::string opt = ctx_.prompt_opt->select_best("director-decompose");
+        if (!opt.empty()) prompt = opt;
+    }
+
+    std::string llm_out = client_.complete(prompt, user_msg.str(), "decompose");
 
     nlohmann::json j = parse_llm_json(llm_out);
     if (!j.is_array())
@@ -947,6 +1332,7 @@ std::string DirectorAgent::synthesise(
              << "- Write in the same language the user used\n"
              << "- If a file/resource was not found: state the specific error concisely\n"
              << "- If a command succeeded: share the actual output\n"
+             << "- For file create/write/update requests, explicitly state the exact target path and add one brief verification line based on the tool results\n"
              << "- Do not mention agents, pipeline, subtasks, JSON, or internal mechanics\n"
              << "- Be direct and concise  --  no padding\n"
              << "- Do not invent or guess information not in the results";
@@ -959,8 +1345,17 @@ std::string DirectorAgent::synthesise(
         return "[Budget limit reached: $" + std::to_string(ctx_.budget_usd) +
                " -- partial results shown above]";
     }
-    return client_.complete(synthesise_prompt_, user_msg.str(), "synthesise");
+
+    std::string prompt = synthesise_prompt_;
+    if (ctx_.prompt_opt) {
+        std::string opt = ctx_.prompt_opt->select_best("director-synthesise");
+        if (!opt.empty()) prompt = opt;
+    }
+
+    return client_.complete(prompt, user_msg.str(), "synthesise");
 }
 
 
 } // namespace agent
+
+

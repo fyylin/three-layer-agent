@@ -3,7 +3,7 @@
 // =============================================================================
 #include "utils/workspace.hpp"
 #include "utils/file_lock.hpp"
-#include <fstream>
+#include "utils/utf8_fstream.hpp"
 #include <sstream>
 #include <stdexcept>
 #include <nlohmann/json.hpp>
@@ -31,6 +31,15 @@ std::string WorkspaceManager::join(const std::string& a, const std::string& b) {
     return a + "/" + b;
 }
 
+static std::wstring utf8_to_wchar(const std::string& str) {
+    if (str.empty()) return L"";
+    int len = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
+    if (len <= 0) return L"";
+    std::wstring result(len - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &result[0], len);
+    return result;
+}
+
 void WorkspaceManager::mkdirs(const std::string& path) {
 #ifdef _WIN32
     std::string p = path;
@@ -43,10 +52,10 @@ void WorkspaceManager::mkdirs(const std::string& path) {
             std::string sub = p.substr(0, i);
             // Skip drive root like "C:"
             if (sub.size() == 2 && sub[1] == ':') continue;
-            CreateDirectoryA(sub.c_str(), nullptr);
+            CreateDirectoryW(utf8_to_wchar(sub).c_str(), nullptr);
         }
     }
-    CreateDirectoryA(p.c_str(), nullptr);
+    CreateDirectoryW(utf8_to_wchar(p).c_str(), nullptr);
 #else
     for (size_t i = 1; i <= path.size(); ++i) {
         if (i == path.size() || path[i] == '/') {
@@ -112,7 +121,7 @@ WorkspacePaths WorkspaceManager::init(const std::string& root,
     mkdirs(join(root, "conversations"));
 
     // Initialise empty state.json
-    std::ofstream f(wp.state_json);
+    utf8_ofstream f(wp.state_json);
     if (f.is_open()) f << "{}\n";
 
     return wp;
@@ -137,7 +146,7 @@ void WorkspaceManager::write_state(const WorkspacePaths& wp,
     // Read current
     std::string current;
     {
-        std::ifstream f(wp.state_json);
+        utf8_ifstream f(wp.state_json);
         if (f.is_open()) { std::ostringstream ss; ss << f.rdbuf(); current = ss.str(); }
     }
 
@@ -155,7 +164,7 @@ void WorkspaceManager::write_state(const WorkspacePaths& wp,
         }
         root[agent_id] = fragment;
 
-        std::ofstream f(wp.state_json);
+        utf8_ofstream f(wp.state_json);
         if (f.is_open()) f << root.dump(2) << "\n";
     } catch (...) {}
 }
@@ -167,19 +176,19 @@ void WorkspaceManager::append_log(const WorkspacePaths& wp,
     // Structured NDJSON to structured.ndjson (machine-readable)
     if (!wp.structured_log.empty()) {
         ScopedFileLock lock1(wp.structured_log + ".lock", 500);
-        std::ofstream f1(wp.structured_log, std::ios::app);
+        utf8_ofstream f1(wp.structured_log, std::ios::app);
         if (f1.is_open()) f1 << ndjson_line << "\n";
     }
     // Human-readable Markdown to activity.md (replaces agent.log)
     if (!wp.activity_md.empty()) {
         ScopedFileLock lock2(wp.activity_md + ".lock", 500);
-        std::ofstream f2(wp.activity_md, std::ios::app);
+        utf8_ofstream f2(wp.activity_md, std::ios::app);
         if (f2.is_open()) f2 << ndjson_line << "\n";
     }
     // Conv-scoped runs log
     if (!wp.conv_runs_md.empty()) {
         ScopedFileLock lock3(wp.conv_runs_md + ".lock", 500);
-        std::ofstream f3(wp.conv_runs_md, std::ios::app);
+        utf8_ofstream f3(wp.conv_runs_md, std::ios::app);
         if (f3.is_open()) f3 << ndjson_line << "\n";
     }
 }
@@ -255,11 +264,11 @@ void ResourceManager::write_shared(const std::string& shared_path,
     std::string path = WorkspaceManager::join(shared_path, filename);
     {
         ScopedFileLock lock(path + ".lock", 3000);
-        std::ofstream f(path);
+        utf8_ofstream f(path);
         if (f.is_open()) f << content;
     }
     if (!writer_id.empty()) {
-        std::ofstream m(path + ".meta");
+        utf8_ofstream m(path + ".meta");
         if (m.is_open())
             m << "{\"writer\":\"" << writer_id << "\","
               << "\"size\":" << content.size() << "}\n";
@@ -270,7 +279,7 @@ std::optional<std::string> ResourceManager::read_shared(
         const std::string& shared_path,
         const std::string& filename) {
     std::string path = WorkspaceManager::join(shared_path, filename);
-    std::ifstream f(path);
+    utf8_ifstream f(path);
     if (!f.is_open()) return std::nullopt;
     std::ostringstream ss; ss << f.rdbuf();
     return ss.str();
@@ -293,18 +302,23 @@ std::vector<std::string> ResourceManager::list_shared(
     }
     closedir(dp);
 #else
-    WIN32_FIND_DATAA ffd;
-    std::string pattern = shared_path + "\\*";
-    HANDLE h = FindFirstFileA(pattern.c_str(), &ffd);
+    WIN32_FIND_DATAW ffd;
+    std::wstring pattern = utf8_to_wchar(shared_path + "\\*");
+    HANDLE h = FindFirstFileW(pattern.c_str(), &ffd);
     if (h == INVALID_HANDLE_VALUE) return result;
     do {
-        std::string name = ffd.cFileName;
+        std::wstring wname = ffd.cFileName;
+        std::string name;
+        if (!wname.empty()) {
+            int len = WideCharToMultiByte(CP_UTF8, 0, wname.c_str(), -1, nullptr, 0, nullptr, nullptr);
+            if (len > 0) { name.resize(len - 1); WideCharToMultiByte(CP_UTF8, 0, wname.c_str(), -1, &name[0], len, nullptr, nullptr); }
+        }
         if (name == "." || name == "..") continue;
         if (name.size() > 5 &&
             (name.substr(name.size()-5) == ".lock" ||
              name.substr(name.size()-5) == ".meta")) continue;
         result.push_back(name);
-    } while (FindNextFileA(h, &ffd));
+    } while (FindNextFileW(h, &ffd));
     FindClose(h);
 #endif
     return result;
@@ -329,7 +343,7 @@ void ResourceManager::append_shared(const std::string& shared_path,
                                      const std::string& /*writer_id*/) {
     std::string path = WorkspaceManager::join(shared_path, filename);
     ScopedFileLock lock(path + ".lock", 3000);
-    std::ofstream f(path, std::ios::app);
+    utf8_ofstream f(path, std::ios::app);
     if (f.is_open()) f << line << "\n";
 }
 

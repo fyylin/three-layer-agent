@@ -16,6 +16,9 @@
 #include "agent/manager_pool.hpp"
 #include "agent/api_client.hpp"
 #include "agent/agent_context.hpp"
+#include "agent/task_router.hpp"
+#include "agent/experience_db.hpp"
+#include "agent/conversation_context.hpp"
 #include "utils/thread_pool.hpp"
 
 #include <atomic>
@@ -51,6 +54,7 @@ public:
                   std::string     decompose_prompt,
                   std::string     review_prompt,
                   std::string     synthesise_prompt,
+                  std::string     classify_prompt = "",
                   int             max_subtask_retries = 2,
                   AgentContext    ctx = AgentContext{});   // ← v2
 
@@ -58,7 +62,7 @@ public:
     [[nodiscard]] std::shared_ptr<agent::StateMachine> state() const noexcept
         { return ctx_.state; }
 
-    // Assess task complexity (heuristic, zero LLM calls)
+    // Heuristic fallback complexity assessment used when LLM classification is unavailable.
     [[nodiscard]] static TaskComplexity assess_complexity(
         const std::string& description) noexcept;
     [[nodiscard]] const std::string& id() const noexcept { return id_; }
@@ -72,8 +76,15 @@ private:
     std::string    decompose_prompt_;
     std::string    review_prompt_;
     std::string    synthesise_prompt_;
+    std::string    classify_prompt_;
     int            max_subtask_retries_;
-    AgentContext   ctx_;   // ← v2
+    AgentContext   ctx_;
+    TaskRouter     router_;
+    ExperienceDB   experience_;
+    ConversationContext conv_ctx_;
+
+    [[nodiscard]] TaskComplexity classify_complexity(
+        const std::string& description) noexcept;
 
     [[nodiscard]] std::vector<SubTask> decompose_goal(
         const UserGoal& goal, const std::string& format_hint = "") const;
